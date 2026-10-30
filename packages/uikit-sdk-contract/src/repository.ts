@@ -1,6 +1,7 @@
 import type { ConversationTypeValue } from './constants'
 import type {
   CreateGroupParams,
+  MultiBodySegmentInput,
   SdkMessage,
   UiContact,
   UiConversation,
@@ -157,6 +158,14 @@ export interface MessageRepository {
     title: string,
     summary: string,
     messageList: SdkMessage[],
+    ext?: Record<string, unknown>,
+    needReadReceipt?: boolean,
+  ) => Promise<SdkMessage>
+
+  sendMultiBody: (
+    conversationId: string,
+    conversationType: ConversationTypeValue,
+    bodies: readonly MultiBodySegmentInput[],
     ext?: Record<string, unknown>,
     needReadReceipt?: boolean,
   ) => Promise<SdkMessage>

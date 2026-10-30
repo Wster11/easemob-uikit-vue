@@ -37,6 +37,7 @@ const FORWARDABLE_TYPES = new Set<string>([
   MESSAGE_TYPE.LOCATION,
   MESSAGE_TYPE.CUSTOM,
   MESSAGE_TYPE.COMBINE,
+  MESSAGE_TYPE.MULTI_BODY,
 ])
 
 /** 判断单条消息是否可转发：仅已发送、未撤回、且类型在可转发集合内 */

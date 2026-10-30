@@ -1,4 +1,4 @@
-import type { CustomMessageBody, TextMessageBody, UiMessage } from '@easemob-community/uikit-core'
+import type { CustomMessageBody, MultiBodySegmentInput, TextMessageBody, UiMessage } from '@easemob-community/uikit-core'
 import { CONVERSATION_TYPE, MESSAGE_TYPE } from '@easemob-community/uikit-core'
 import type { ConversationTypeValue } from '@easemob-community/uikit-core'
 import { createLogger } from '@easemob-community/uikit-core'
@@ -151,6 +151,29 @@ export function useMessageSend() {
     await domains.message.sendCustom(cvs.id, cvs.type, event, params, ext)
   }
 
+  /**
+   * 发送复合消息（SDK multi_body）。
+   * bodies 为 2 到 20 段，每段是文本/图片/文件/语音/视频/位置/自定义之一。
+   * Send a multi_body message. `bodies` must contain 2 to 20 segments.
+   */
+  async function sendMultiBodyMessage(
+    bodies: readonly MultiBodySegmentInput[],
+    options?: SendMessageOptions,
+    ext?: Record<string, unknown>,
+  ) {
+    const cvs = currentCvs()
+    if (!cvs)
+      return
+    const enableGroupAck = shouldEnableGroupAck(
+      cvs.type,
+      cvs.id,
+      options?.groupReadReceiptEnabled,
+      options?.maxGroupSize,
+      stores,
+    )
+    await domains.message.sendMultiBody(cvs.id, cvs.type, bodies, ext, enableGroupAck)
+  }
+
   /** 发送命令消息 */
   async function sendCmdMessage(action: string, ext?: Record<string, unknown>) {
     const cvs = currentCvs()
@@ -214,6 +237,7 @@ export function useMessageSend() {
     sendVideoMessage,
     sendLocationMessage,
     sendCustomMessage,
+    sendMultiBodyMessage,
     sendCmdMessage,
     resendMessage,
   }

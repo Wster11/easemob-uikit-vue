@@ -334,7 +334,7 @@ function createDemoSettings() {
   const inputDemoValue = ref('')
 
   /* ===== 聊天输入框配置 ===== */
-  const chatInputMode = ref<'simple' | 'rich'>('simple')
+  const chatInputMode = ref<'simple' | 'rich'>('rich')
   const chatInputStyle = ref<'toolbar-top' | 'toolbar-bottom'>('toolbar-top')
   const chatInputFeatures = ref({
     emoji: true,
@@ -526,7 +526,7 @@ function createDemoSettings() {
   setKeyboardShortcutsEnabled(keyboardShortcutsEnabled.value)
 
   /* ===== SDK 初始化 / 登录配置 ===== */
-  const sdkAppKey = ref('easemob-demo#support-ngi')
+  const sdkAppKey = ref('easemob-demo#support')
   const sdkApiUrl = ref('')
   const sdkDebug = ref(false)
   const loginUser = ref('hfp')

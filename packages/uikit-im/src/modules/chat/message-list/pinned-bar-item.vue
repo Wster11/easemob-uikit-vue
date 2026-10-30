@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useLocale } from '@easemob-community/uikit-core'
-import { MESSAGE_TYPE } from '@easemob-community/uikit-core'
-import { useUserInfo } from '../../../composables/use-user-info'
 import type { TextMessageBody, UiMessage } from '@easemob-community/uikit-core'
+import { MESSAGE_TYPE, useLocale } from '@easemob-community/uikit-core'
+import { formatMultiBodyPreview } from '@easemob-community/uikit-sdk-contract'
+import { useUserInfo } from '../../../composables/use-user-info'
 
 export interface PinnedBarItemProps {
   /** 置顶消息 */
@@ -40,6 +40,17 @@ const preview = computed(() => {
     return t('message.file', '[文件]')
   if (msg.type === MESSAGE_TYPE.COMBINE)
     return t('message.combine', '[聊天记录]')
+  if (msg.type === MESSAGE_TYPE.MULTI_BODY) {
+    const text = formatMultiBodyPreview(msg.body, {
+      image: t('message.image', '[图片]'),
+      voice: t('message.audio', '[语音]'),
+      video: t('message.video', '[视频]'),
+      file: t('message.file', '[文件]'),
+      location: t('message.location', '[位置]'),
+      customFallback: t('message.custom', '[消息]'),
+    })
+    return text.length > max ? `${text.slice(0, max)}…` : text
+  }
   return t('message.custom', '[消息]')
 })
 </script>

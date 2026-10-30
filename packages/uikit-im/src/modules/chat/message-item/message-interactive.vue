@@ -5,6 +5,7 @@ import type { UiMessage } from '@easemob-community/uikit-core'
 import { useUIKit } from '../../../composables/use-uikit'
 import { useGroupStore } from '../../../store/group'
 import { resolveTranslateLang } from '../../../composables/use-message-actions'
+import { multiBodyTextContent } from '../../../utils/resolve-last-message-text'
 import MessageActionMenu from '../message-action-menu/message-action-menu.vue'
 import type { ChatConfig, MessageActionEvent, MessageActionItem, MessageActionType } from '../types'
 
@@ -104,7 +105,9 @@ const actions = computed<MessageActionItem[]>(() => {
   if (cfg?.enableQuote !== false)
     add('quote', t('message.action.quote') ?? '引用', 'arrow/turn_left')
   // 复制：仅文本消息支持；图片/视频/文件等类型暂不提供复制
-  if (cfg?.enableCopy !== false && props.message.type === MESSAGE_TYPE.TEXT)
+  const canCopy = props.message.type === MESSAGE_TYPE.TEXT
+    || (props.message.type === MESSAGE_TYPE.MULTI_BODY && multiBodyTextContent(props.message.body).length > 0)
+  if (cfg?.enableCopy !== false && canCopy)
     add('copy', t('message.action.copy') ?? '复制', 'rects')
   // 下载：仅文件消息在右键/长按菜单中提供下载入口
   if (cfg?.enableDownload !== false && props.message.type === MESSAGE_TYPE.FILE)

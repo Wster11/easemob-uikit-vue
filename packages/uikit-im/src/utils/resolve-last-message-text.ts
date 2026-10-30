@@ -17,6 +17,7 @@ export type {
 } from '@easemob-community/uikit-sdk-contract'
 
 import type { MessagePreviewLabels } from '@easemob-community/uikit-sdk-contract'
+import { MESSAGE_TYPE } from '@easemob-community/uikit-core'
 
 /**
  * 中文消息摘要预览标签（供 UIKit 默认中文 UI 使用）。
@@ -37,6 +38,21 @@ export const chineseMessagePreviewLabels: MessagePreviewLabels = {
   },
   customFallback: '[自定义]',
   unknown: '[未知消息]',
+}
+
+/** 复合消息里可复制的纯文本：按分段顺序拼接文本段，媒体段不进入剪贴板 */
+export function multiBodyTextContent(body: unknown): string {
+  if (!Array.isArray(body))
+    return ''
+  const parts: string[] = []
+  for (const segment of body) {
+    if (!segment || typeof segment !== 'object')
+      continue
+    const record = segment as { type?: string, content?: string }
+    if (record.type === MESSAGE_TYPE.TEXT && record.content)
+      parts.push(record.content)
+  }
+  return parts.join('\n')
 }
 
 import type { UiMessage } from '@easemob-community/uikit-core'

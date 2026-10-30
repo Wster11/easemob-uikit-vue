@@ -96,6 +96,52 @@ export function formatConversationPreview(
   return text
 }
 
+/**
+ * 复合消息摘要：按分段顺序拼接文本和媒体占位。
+ * Preview text for a multi_body message, in segment order.
+ */
+export function formatMultiBodyPreview(
+  body: unknown,
+  labels?: Partial<MessagePreviewLabels>,
+): string {
+  const l = mergeMessagePreviewLabels(labels)
+  if (!Array.isArray(body))
+    return l.unknown
+  const parts: string[] = []
+  for (const segment of body) {
+    if (!segment || typeof segment !== 'object')
+      continue
+    const record = segment as { type?: string, content?: string, filename?: string, event?: string }
+    switch (record.type) {
+      case MESSAGE_TYPE.TEXT:
+        if (record.content)
+          parts.push(record.content)
+        break
+      case MESSAGE_TYPE.IMAGE:
+        parts.push(l.image)
+        break
+      case MESSAGE_TYPE.VOICE:
+        parts.push(l.voice)
+        break
+      case MESSAGE_TYPE.VIDEO:
+        parts.push(l.video)
+        break
+      case MESSAGE_TYPE.FILE:
+        parts.push(record.filename || l.file)
+        break
+      case MESSAGE_TYPE.LOCATION:
+        parts.push(l.location)
+        break
+      case MESSAGE_TYPE.CUSTOM:
+        parts.push(l.custom[record.event || ''] ?? l.customFallback)
+        break
+      default:
+        break
+    }
+  }
+  return parts.join(' ') || l.unknown
+}
+
 /** 消息摘要自定义解析器：返回 undefined 时回落到默认解析 */
 export type LastMessageTextResolver = (message: UiMessage) => string | undefined
 
@@ -130,6 +176,8 @@ export function defaultLastMessageTextResolver(
     }
     case MESSAGE_TYPE.COMBINE:
       return l.combine
+    case MESSAGE_TYPE.MULTI_BODY:
+      return formatMultiBodyPreview(message.body, l)
     case MESSAGE_TYPE.NOTICE:
       // 本地系统通知不进入会话列表摘要，避免本地-only 状态误导多设备预览
       return ''

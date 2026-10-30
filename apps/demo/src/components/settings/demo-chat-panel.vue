@@ -96,7 +96,7 @@ const {
     <div class="demo-settings__group">
       <DemoSettingLabel
         title="输入框模式"
-        tip="简洁：纯文本输入 + 工具栏按钮；富文本：支持加粗、斜体、列表、@提及等排版能力"
+        tip="简洁：纯文本输入 + 工具栏按钮；富文本：图文混排（图片/文件插在光标处，按文档顺序发送）"
       />
       <div class="demo-settings__options">
         <button

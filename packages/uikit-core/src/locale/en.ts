@@ -75,6 +75,8 @@ const messages: LocaleMessages = {
   'chat.placeholder': 'Type a message...',
   'chat.send': 'Send',
   'chat.input.pasteImageTitle': 'Send Image',
+  'chat.input.removeAttachment': 'Remove',
+  'chat.input.multiBodyLimit': 'A composite message can have at most 20 parts',
   'chat.groupCardNotJoined': 'You have not joined this group and cannot send messages',
   'chat.input.mutedAll': 'All members are muted',
   'conversation.title': 'Conversations',

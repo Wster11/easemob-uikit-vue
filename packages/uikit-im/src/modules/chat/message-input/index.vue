@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { CONVERSATION_TYPE, EmEmojiPicker as EmojiPicker, MESSAGE_EXT_KEY, MESSAGE_TYPE, EmIcon as Icon, EmModal as Modal, EmPopup as Popup, createLogger, formatSdkError, resolveSdkErrorMessage, useLocale, useToast, useViewport } from '@easemob-community/uikit-core'
-import type { EmojiStickerItem, UiMessage } from '@easemob-community/uikit-core'
+import { CONVERSATION_TYPE, EmEmojiPicker as EmojiPicker, MESSAGE_EXT_KEY, MESSAGE_TYPE, EmIcon as Icon, EmPopup as Popup, createLogger, formatSdkError, resolveSdkErrorMessage, useLocale, useToast, useViewport } from '@easemob-community/uikit-core'
+import type { EmojiStickerItem, MultiBodySegmentInput, UiMessage } from '@easemob-community/uikit-core'
 import { useChat } from '../../../composables/use-chat'
 import { useQuote } from '../../../composables/use-quote'
 import { useUIKit } from '../../../composables/use-uikit'
@@ -13,6 +13,7 @@ import H5Input from '../h5-input/h5-input.vue'
 import SimpleInput from './simple-input.vue'
 import RichInput from './rich-input.vue'
 import EditingBar from './editing-bar.vue'
+import { COMPOSER_SEGMENT_LIMIT, composerSegmentToInput, type ComposerSegment } from './composer-segment'
 
 const props = defineProps<MessageInputProps>()
 
@@ -42,7 +43,7 @@ export interface MessageInputEmits {
   (e: 'contact-card-click'): void
 }
 
-const { sendTextMessage, sendImageMessage, sendFileMessage, sendAudioMessage, sendVideoMessage, sendCmdMessage, currentConversation, editingMessage, exitEditMode, modifyTextMessage } = useChat()
+const { sendTextMessage, sendImageMessage, sendFileMessage, sendAudioMessage, sendVideoMessage, sendCmdMessage, sendMultiBodyMessage, currentConversation, editingMessage, exitEditMode, modifyTextMessage } = useChat()
 const { features, capabilities } = useUIKit()
 const { quotedMessage, clearQuote, buildQuoteExt } = useQuote()
 const { isMobile } = useViewport()
@@ -177,236 +178,122 @@ function handleCancelEdit() {
   setText('')
 }
 
-/** 发送文本消息（或提交编辑） */
-async function handleSendText(text: string, mentionList?: MentionContact[]) {
-  // 编辑模式：改为调用 modifyMessage
-  if (editingMessage.value) {
-    const target = editingMessage.value
-    modifyTextMessage(target, text)
-      .then(() => {
-        setText('')
-        emit('send-success')
-      })
-      .catch((e: any) => {
-        const code = e?.type ?? e?.code
-        const msg = code === 'modifiedCountExceedLimit' || /limit|count|5/i.test(String(e?.message || ''))
-          ? t('message.edit.limitReached')
-          : t('message.edit.failed')
-        showToast(msg, 'error')
-      })
-    return
-  }
+function buildMentionExt(mentionList?: MentionContact[]): Record<string, any> | undefined {
   let ext = buildExtWithQuote()
-  // 如果有 mention，写入 ext.em_at_list
   if (mentionList && mentionList.length > 0) {
     ext = ext || {}
     ext.em_at_list = mentionList.map(m => m.userId)
   }
-  // beforeSend 拦截
-  const canSend = await runBeforeSend({ type: MESSAGE_TYPE.TEXT, body: { content: text } })
-  if (!canSend)
-    return
-  sendTextMessage(text, ext)
-    .then((msg) => {
-      emit('send-success')
-      runAfterSend(msg)
-    })
-    .catch((e: any) => {
-      logger.error('[MessageInput] sendTextMessage failed:', formatSdkError(e))
-      showToast(resolveSdkErrorMessage(e, 'message.send.failed', t), 'error')
-    })
-  clearQuote()
+  return ext
 }
 
-/** 发送富文本消息（或提交编辑） */
-async function handleSendRich(_html: string, text: string, mentionList?: MentionContact[]) {
-  if (editingMessage.value) {
-    const target = editingMessage.value
-    modifyTextMessage(target, text)
-      .then(() => {
-        setText('')
-        emit('send-success')
-      })
-      .catch((e: any) => {
-        const code = e?.type ?? e?.code
-        const msg = code === 'modifiedCountExceedLimit' || /limit|count|5/i.test(String(e?.message || ''))
-          ? t('message.edit.limitReached')
-          : t('message.edit.failed')
-        showToast(msg, 'error')
-      })
-    return
-  }
-  let ext = buildExtWithQuote()
-  // 如果有 mention，写入 ext.em_at_list
-  if (mentionList && mentionList.length > 0) {
-    ext = ext || {}
-    ext.em_at_list = mentionList.map(m => m.userId)
-  }
-  // beforeSend 拦截
-  const canSend = await runBeforeSend({ type: MESSAGE_TYPE.TEXT, body: { content: text } })
-  if (!canSend)
-    return
-  sendTextMessage(text, ext)
-    .then((msg) => {
-      emit('send-success')
-      runAfterSend(msg)
-    })
-    .catch((e: any) => {
-      logger.error('[MessageInput] sendTextMessage failed:', formatSdkError(e))
-      showToast(resolveSdkErrorMessage(e, 'message.send.failed', t), 'error')
-    })
-  clearQuote()
-}
-
-/** 待回收的 Blob URL 列表 */
-const pendingBlobUrls = new Set<string>()
-
-/** 发送文件消息 */
-async function handleSendFile(type: 'image' | 'file' | 'video', files: FileList | File[]) {
-  const file = Array.from(files)[0]
-  if (!file)
-    return
-
-  const ext = buildExtWithQuote()
-
-  // beforeSend 拦截
-  const canSend = await runBeforeSend({ type: type === MESSAGE_TYPE.IMAGE ? MESSAGE_TYPE.IMAGE : type })
-  if (!canSend)
-    return
-
-  let promise: Promise<any> | undefined
-  if (type === MESSAGE_TYPE.IMAGE) {
-    promise = sendImageMessage(file, groupReadReceiptConfig.value, ext)
-  }
-  else if (type === MESSAGE_TYPE.VIDEO) {
-    const duration = await getVideoDuration(file)
-    promise = sendVideoMessage(file, duration, groupReadReceiptConfig.value, ext)
-  }
-  else {
-    promise = sendFileMessage(file, groupReadReceiptConfig.value, ext)
-  }
+function trackSend(promise: Promise<any> | undefined, label: string) {
   promise?.then((msg) => {
     emit('send-success')
     runAfterSend(msg)
   }).catch((e: any) => {
-    logger.error('[MessageInput] sendFile failed:', formatSdkError(e))
+    logger.error(`[MessageInput] ${label} failed:`, formatSdkError(e))
     showToast(resolveSdkErrorMessage(e, 'message.send.failed', t), 'error')
   })
-  clearQuote()
 }
 
-// ===== 粘贴图片预览弹窗（simple 模式） =====
-
-/** 预览弹窗显隐 */
-const showPastePreview = ref(false)
-
-/** 待发送的粘贴图片文件 */
-const pastePreviewFiles = ref<File[]>([])
-
-/** 预览用 Blob URL（与 pastePreviewFiles 一一对应） */
-const pastePreviewUrls = ref<string[]>([])
-
-/** 剪贴板图片粘贴：生成预览 URL 并打开确认弹窗 */
-function onImagePaste(files: File[]) {
-  if (!files.length)
+function submitTextEdit(text: string) {
+  const target = editingMessage.value
+  if (!target)
     return
-  pastePreviewFiles.value = files
-  pastePreviewUrls.value = files.map((file) => {
-    const url = URL.createObjectURL(file)
-    pendingBlobUrls.add(url)
-    return url
-  })
-  showPastePreview.value = true
+  modifyTextMessage(target, text)
+    .then(() => {
+      setText('')
+      emit('send-success')
+    })
+    .catch((e: any) => {
+      const code = e?.type ?? e?.code
+      const msg = code === 'modifiedCountExceedLimit' || /limit|count|5/i.test(String(e?.message || ''))
+        ? t('message.edit.limitReached')
+        : t('message.edit.failed')
+      showToast(msg, 'error')
+    })
 }
 
-/** 关闭预览弹窗并回收本次预览的 Blob URL（从待回收集合移除后 revoke） */
-function closePastePreview() {
-  pastePreviewUrls.value.forEach((url) => {
-    pendingBlobUrls.delete(url)
-    URL.revokeObjectURL(url)
-  })
-  pastePreviewFiles.value = []
-  pastePreviewUrls.value = []
-  pastePreviewNaturalSizes.value = {}
-}
-
-/** 确认发送：逐张走既有 handleSendFile 链路（beforeSend 钩子/引用 ext/群已读配置自动继承） */
-async function confirmPastePreview() {
-  const files = [...pastePreviewFiles.value]
-  closePastePreview()
-  for (const file of files) {
-    await handleSendFile(MESSAGE_TYPE.IMAGE, [file])
+function sendSingleBody(body: MultiBodySegmentInput, ext?: Record<string, any>) {
+  if (body.type === MESSAGE_TYPE.TEXT)
+    return sendTextMessage(body.content, ext)
+  if (body.type === MESSAGE_TYPE.IMAGE) {
+    const data = body.data || body.originalUrl
+    if (!data)
+      return undefined
+    return sendImageMessage(data, groupReadReceiptConfig.value, ext)
   }
-}
-
-/** 粘贴图片大小展示（B/KB/MB） */
-function formatPasteSize(bytes: number): string {
-  if (bytes < 1024)
-    return `${bytes} B`
-  if (bytes < 1024 * 1024)
-    return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-}
-
-/** 预览图自然尺寸（img 加载后回填，key 为 Blob URL，用于按宽高比等比缩放展示） */
-const pastePreviewNaturalSizes = ref<Record<string, { width: number, height: number }>>({})
-
-/** 单图预览展示尺寸上限（弹窗宽 480，内容区约 400px） */
-const PASTE_PREVIEW_MAX_W = 400
-const PASTE_PREVIEW_MAX_H = 320
-
-/** 记录预览图自然尺寸 */
-function onPastePreviewLoad(url: string, event: Event) {
-  const img = event.target as HTMLImageElement
-  if (img?.naturalWidth && img?.naturalHeight) {
-    pastePreviewNaturalSizes.value[url] = { width: img.naturalWidth, height: img.naturalHeight }
-  }
+  if (body.type === MESSAGE_TYPE.VIDEO && body.data)
+    return sendVideoMessage(body.data, body.duration, groupReadReceiptConfig.value, ext)
+  if (body.type === MESSAGE_TYPE.FILE && body.data)
+    return sendFileMessage(body.data, groupReadReceiptConfig.value, ext)
+  return undefined
 }
 
 /**
- * 单图预览尺寸：等比缩放进上限框（与消息气泡 displaySize 同一算法）——
- * 16:9 等横图受宽限、9:16 等竖图受高限，其余比例同一算法自动适配；未加载完成时给占位框。
+ * 按输入框文档顺序发送。
+ * 0 段不发；恰好 1 段走原来的文本/图片/文件/视频接口；2–20 段走 multi_body。
  */
-function pastePreviewImgStyle(url: string): Record<string, string> {
-  const natural = pastePreviewNaturalSizes.value[url]
-  if (!natural)
-    return { width: '320px', height: '240px' }
-  const ratio = Math.min(PASTE_PREVIEW_MAX_W / natural.width, PASTE_PREVIEW_MAX_H / natural.height, 1)
-  return {
-    width: `${Math.round(natural.width * ratio)}px`,
-    height: `${Math.round(natural.height * ratio)}px`,
+async function dispatchComposed(mentionList: MentionContact[] | undefined, segments: ComposerSegment[]) {
+  if (editingMessage.value) {
+    const text = segments
+      .filter(segment => segment.type === MESSAGE_TYPE.TEXT)
+      .map(segment => segment.content)
+      .join('\n')
+      .trim()
+    if (text)
+      submitTextEdit(text)
+    return
   }
+
+  const bodies: MultiBodySegmentInput[] = []
+  for (const segment of segments) {
+    const input = await composerSegmentToInput(segment)
+    if (input)
+      bodies.push(input)
+  }
+
+  if (bodies.length === 0)
+    return
+  if (bodies.length > COMPOSER_SEGMENT_LIMIT) {
+    showToast(t('chat.input.multiBodyLimit'), 'error')
+    return
+  }
+  if (!currentConversation.value)
+    return
+
+  const ext = buildMentionExt(mentionList)
+  const messageType = bodies.length === 1 ? bodies[0].type : MESSAGE_TYPE.MULTI_BODY
+  const canSend = await runBeforeSend(
+    messageType === MESSAGE_TYPE.TEXT
+      ? { type: messageType, body: { content: bodies[0].type === MESSAGE_TYPE.TEXT ? bodies[0].content : '' } }
+      : { type: messageType },
+  )
+  if (!canSend)
+    return
+
+  clearQuote()
+  const promise = bodies.length === 1
+    ? sendSingleBody(bodies[0], ext)
+    : sendMultiBodyMessage(bodies, groupReadReceiptConfig.value, ext)
+  trackSend(promise, bodies.length === 1 ? 'send' : 'sendMultiBodyMessage')
 }
 
-/** 读取本地视频时长（秒），失败或无法读取时兜底返回 1 */
-function getVideoDuration(file: File): Promise<number> {
-  return new Promise((resolve) => {
-    if (typeof document === 'undefined') {
-      resolve(1)
-      return
-    }
-    const video = document.createElement('video')
-    const url = URL.createObjectURL(file)
-    video.preload = 'metadata'
-    video.muted = true
-    video.playsInline = true
-    video.src = url
+/** 简单 / H5 输入：分段已按文档顺序交出 */
+async function handleSendText(text: string, mentionList?: MentionContact[], segments?: ComposerSegment[]) {
+  await dispatchComposed(
+    mentionList,
+    segments ?? (text.trim() ? [{ type: MESSAGE_TYPE.TEXT, content: text.trim() }] : []),
+  )
+}
 
-    let settled = false
-    const finish = (duration: number) => {
-      if (settled)
-        return
-      settled = true
-      URL.revokeObjectURL(url)
-      resolve(Math.max(1, Math.floor(duration || 0)))
-    }
-
-    video.addEventListener('loadedmetadata', () => finish(video.duration))
-    video.addEventListener('error', () => finish(1))
-
-    // 5s 超时兜底
-    setTimeout(() => finish(1), 5000)
-  })
+/** 富文本输入：分段按编辑器文档顺序 */
+async function handleSendRich(_html: string, text: string, mentionList?: MentionContact[], segments?: ComposerSegment[]) {
+  await dispatchComposed(
+    mentionList,
+    segments ?? (text.trim() ? [{ type: MESSAGE_TYPE.TEXT, content: text.trim() }] : []),
+  )
 }
 
 /** 打开 Emoji 选择器 */
@@ -762,14 +649,9 @@ function handleVoiceCancel() {
   audioChunks = []
 }
 
-/** 组件卸载时清理锚点与 Blob URL */
+/** 组件卸载时清理锚点 */
 onBeforeUnmount(() => {
   cleanupMentionAnchor()
-  // 回收所有未释放的 Blob URL
-  pendingBlobUrls.forEach((url) => {
-    URL.revokeObjectURL(url)
-  })
-  pendingBlobUrls.clear()
   // 清理录音资源
   handleVoiceCancel()
   // 清理收起动画定时器
@@ -888,8 +770,8 @@ defineExpose({
       :enable-mention="enableMention"
       :mention-open="showMentionPicker"
       :keyboard-height="props.keyboardHeight"
+      :media-disabled="!!editingMessage"
       @send="handleSendText"
-      @send-file="handleSendFile"
       @voice-start="handleVoiceStart"
       @voice-end="handleVoiceEnd"
       @voice-cancel="handleVoiceCancel"
@@ -914,9 +796,8 @@ defineExpose({
       :config="inputConfig"
       :enable-mention="enableMention"
       :mention-open="showMentionPicker"
+      :media-disabled="!!editingMessage"
       @send="handleSendText"
-      @send-file="handleSendFile"
-      @image-paste="onImagePaste"
       @emoji-click="onEmojiClick"
       @voice-start="handleVoiceStart"
       @voice-end="handleVoiceEnd"
@@ -946,8 +827,8 @@ defineExpose({
       :config="inputConfig"
       :enable-mention="enableMention"
       :mention-open="showMentionPicker"
+      :media-disabled="!!editingMessage"
       @send="handleSendRich"
-      @send-file="handleSendFile"
       @emoji-click="onEmojiClick"
       @mention-trigger="onMentionTrigger"
       @mention-close="onMentionClose"
@@ -1021,34 +902,6 @@ defineExpose({
       @update:show="showMentionPicker = $event"
       @select="onMentionSelect"
     />
-
-    <!-- 粘贴图片预览确认弹窗（simple 模式；ESC/取消/遮罩关闭均走 cancel 回收 Blob URL） -->
-    <Modal
-      v-model:show="showPastePreview"
-      :title="t('chat.input.pasteImageTitle', '发送图片')"
-      :confirm-text="t('chat.send')"
-      :width="480"
-      @confirm="confirmPastePreview"
-      @cancel="closePastePreview"
-    >
-      <div
-        class="paste-image-preview"
-        :class="{ 'paste-image-preview--grid': pastePreviewUrls.length > 1 }"
-      >
-        <figure v-for="(url, i) in pastePreviewUrls" :key="url" class="paste-image-preview__item">
-          <img
-            class="paste-image-preview__img"
-            :src="url"
-            :alt="pastePreviewFiles[i]?.name"
-            :style="pastePreviewUrls.length > 1 ? undefined : pastePreviewImgStyle(url)"
-            @load="onPastePreviewLoad(url, $event)"
-          >
-          <figcaption class="paste-image-preview__caption">
-            {{ pastePreviewFiles[i]?.name }}（{{ formatPasteSize(pastePreviewFiles[i]?.size ?? 0) }}）
-          </figcaption>
-        </figure>
-      </div>
-    </Modal>
   </div>
 </template>
 
@@ -1057,52 +910,6 @@ defineExpose({
 .emoji-picker-wrapper {
   width: 320px;
   max-width: calc(100vw - 24px);
-}
-
-/* 粘贴图片预览：单图按宽高比等比缩放居中，多图双列网格（非 scoped，Modal 经 Teleport 挂载） */
-.paste-image-preview {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-
-.paste-image-preview--grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-}
-
-.paste-image-preview__item {
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  min-width: 0;
-}
-
-.paste-image-preview__img {
-  display: block;
-  border-radius: var(--uikit-components-radius, 8px);
-  background-color: var(--uikit-bg-hover);
-}
-
-/* 多图网格：统一单元格尺寸，cover 裁切（缩略图场景一致性优先）；单图尺寸由内联 style 按宽高比精确给出 */
-.paste-image-preview--grid .paste-image-preview__img {
-  width: 100%;
-  height: 140px;
-  object-fit: cover;
-}
-
-.paste-image-preview__caption {
-  font-size: var(--uikit-font-size-13);
-  color: var(--uikit-text-secondary);
-  text-align: center;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 </style>
 
@@ -1141,7 +948,8 @@ defineExpose({
 }
 
 /* simple 模式自定义高度态（拖拽/展开）：退出固定高度，内容自适应（min-height 兜底） */
-.message-input--simple-dragged {
+.message-input--simple-dragged,
+.message-input--simple-pc:has(.simple-input--has-embed) {
   height: auto;
   min-height: 126px;
 }

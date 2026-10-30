@@ -16,6 +16,7 @@ export type MessageType =
   | 'custom'
   | 'cmd'
   | 'combine'
+  | 'multi_body'
 
 /** 消息发送状态（wire 层；`sent` 表示服务端已接受，不代表对端已读） */
 export type SdkSendStatus = 'sending' | 'sent' | 'failed'
@@ -256,7 +257,81 @@ export interface CombineMessageBody {
   combineLevel: number
 }
 
-/** 所有消息体的联合类型（结构型，无统一 `type` 判别字段） */
+/**
+ * 复合消息中的一段。`type` 只出现在分段上，取值与普通消息类型一致。
+ * One segment of a multi_body message. `type` exists only on segments.
+ */
+export type MultiBodySegment =
+  | (TextMessageBody & { type: 'text' })
+  | (ImageMessageBody & { type: 'image' })
+  | (FileMessageBody & { type: 'file' })
+  | (VoiceMessageBody & { type: 'voice' })
+  | (VideoMessageBody & { type: 'video' })
+  | (LocationMessageBody & { type: 'location' })
+  | (CustomMessageBody & { type: 'custom' })
+
+/** 复合消息正文：按发送顺序排列的分段，SDK 要求 2 到 20 段。 */
+export type MultiBody = readonly MultiBodySegment[]
+
+/**
+ * 创建复合消息时传入的分段。本地文件用 `data`，已有远端地址用 `originalUrl`。
+ * Segment input for createMultiBodyMessage. Pass `data` for a local file, or `originalUrl` for a remote file.
+ */
+export type MultiBodySegmentInput =
+  | { type: 'text', content: string, targetLanguages?: string[] }
+  | {
+    type: 'image'
+    data?: File
+    originalUrl?: string
+    filename?: string
+    filetype?: string
+    width?: number
+    height?: number
+    isGif?: boolean
+    isOriginalImage?: boolean
+    fileLength?: number
+    thumbnailUrl?: string
+  }
+  | {
+    type: 'file'
+    data?: File
+    originalUrl?: string
+    filename?: string
+    filetype?: string
+    fileSize?: number
+    fileLength?: number
+  }
+  | {
+    type: 'voice'
+    data?: File
+    originalUrl?: string
+    filename?: string
+    filetype?: string
+    duration: number
+    fileLength?: number
+  }
+  | {
+    type: 'video'
+    data?: File
+    originalUrl?: string
+    filename?: string
+    filetype?: string
+    duration: number
+    width?: number
+    height?: number
+    fileLength?: number
+    thumbnailUrl?: string
+  }
+  | {
+    type: 'location'
+    latitude: number
+    longitude: number
+    address?: string
+    buildingName?: string
+  }
+  | { type: 'custom', event: string, params?: Record<string, string> }
+
+/** 所有消息体的联合类型（普通消息是对象；复合消息正文是分段数组） */
 export type MessageBody =
   | TextMessageBody
   | ImageMessageBody
@@ -267,6 +342,7 @@ export type MessageBody =
   | CmdMessageBody
   | CustomMessageBody
   | CombineMessageBody
+  | MultiBody
 
 /**
  * 中立消息对象：两代 SDK 都映射到该形状；字段名以 5.x 为基准。

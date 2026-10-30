@@ -2,13 +2,25 @@
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
-import Image from '@tiptap/extension-image'
-import { useLocale } from '@easemob-community/uikit-core'
+import { useLocale, useToast } from '@easemob-community/uikit-core'
 import { useResizable, useViewport } from '@easemob-community/uikit-core'
 import { filterActiveMentions } from '../../../utils/mention'
 import { EmButton as Button } from '@easemob-community/uikit-core'
 import { EmIcon as Icon } from '@easemob-community/uikit-core'
 import type { ChatConfig, MentionContact } from '../types'
+import { ComposerAttachment } from './composer-attachment'
+import { ComposerImageNode } from './composer-image-node'
+import { ComposerTrailingParagraph } from './composer-trailing-node'
+import {
+  classifyComposerFile,
+  COMPOSER_SEGMENT_LIMIT,
+  filesFromDataTransfer,
+  filterComposerFiles,
+  type ComposerSegment,
+} from './composer-segment'
+
+/** @deprecated 使用 ComposerSegment。保留别名避免上层 import 断裂。 */
+export type RichComposerSegment = ComposerSegment
 
 export interface RichInputProps {
   config?: ChatConfig['input']
@@ -16,13 +28,17 @@ export interface RichInputProps {
   enableMention?: boolean
   /** @提及选择弹层是否打开（打开时 Enter 优先用于选择联系人，不发送消息） */
   mentionOpen?: boolean
+  /** 编辑文字时禁止插入媒体 */
+  mediaDisabled?: boolean
 }
 
 const props = defineProps<RichInputProps>()
 
+const { show: showToast } = useToast()
+
 const emit = defineEmits<{
-  (e: 'send', html: string, text: string, mentionList?: MentionContact[]): void
-  (e: 'send-file', type: 'image' | 'file' | 'video', files: FileList): void
+  (e: 'send', html: string, text: string, mentionList?: MentionContact[], segments?: ComposerSegment[]): void
+  (e: 'embed-change', hasEmbed: boolean): void
   (e: 'emoji-click', anchor: HTMLElement): void
   (e: 'voice-start'): void
   (e: 'voice-end'): void
@@ -77,6 +93,9 @@ useResizable(resizeHandleRef, {
   },
 })
 
+/** 编辑器里是否已有图片/附件块。有媒体时抬高输入区，避免缩略图被 150px 裁掉。 */
+const hasEmbed = ref(false)
+
 /** CSS 变量（用于全局样式中的 caret/selection/编辑器高度） */
 const cssVars = computed(() => ({
   '--rich-input-caret-color': props.config?.caretColor || 'auto',
@@ -87,7 +106,9 @@ const cssVars = computed(() => ({
       '--rich-input-editor-height': `${editorHeight.value}px`,
       '--rich-input-editor-max-height': `${editorHeight.value}px`,
     }
-    : {}),
+    : hasEmbed.value
+      ? { '--rich-input-editor-max-height': '360px' }
+      : {}),
 }))
 
 /** 最大输入长度 */
@@ -142,9 +163,9 @@ const editor = useEditor({
       horizontalRule: false,
       codeBlock: false,
     }),
-    Image.configure({
-      inline: true,
-    }),
+    ComposerImageNode,
+    ComposerAttachment,
+    ComposerTrailingParagraph,
   ],
   content: '',
   onCreate: ({ editor: e }) => {
@@ -163,6 +184,16 @@ const editor = useEditor({
       class: 'rich-input__editor-content',
     },
     handlePaste: (_view, event) => {
+      const files = filterComposerFiles(
+        filesFromDataTransfer(event.clipboardData),
+        features.value,
+        props.config?.pasteImagePreview !== false,
+      )
+      if (files.length > 0) {
+        event.preventDefault()
+        insertComposerFiles(files)
+        return true
+      }
       if (maxLength.value > 0) {
         const text = _view.state.doc.textContent
         const pastedText = event.clipboardData?.getData('text/plain') || ''
@@ -173,7 +204,27 @@ const editor = useEditor({
       }
       return false
     },
+    handleDrop: (_view, event) => {
+      const files = filterComposerFiles(filesFromDataTransfer(event.dataTransfer), features.value)
+      if (files.length === 0)
+        return false
+      event.preventDefault()
+      insertComposerFiles(files)
+      return true
+    },
     handleKeyDown: (_view, event) => {
+      const selected = (_view.state.selection as { node?: { type: { name: string } } }).node
+      const mediaSelected = selected?.type.name === 'image' || selected?.type.name === 'composerAttachment'
+
+      // 选中图片/附件时直接打字：落到节点后面的段落，而不是替换媒体块
+      if (mediaSelected && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        if (maxLength.value > 0 && _view.state.doc.textContent.length >= maxLength.value)
+          return true
+        event.preventDefault()
+        typeAfterMedia(_view.state.selection.to, event.key)
+        return true
+      }
+
       // 最大长度限制：阻止普通字符输入
       if (maxLength.value > 0 && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
         const text = _view.state.doc.textContent
@@ -250,32 +301,188 @@ function toggleExpand() {
   editor.value?.commands.focus()
 }
 
-/** 是否有内容（包含文本或图片） */
+/** 是否有内容（文本、图片或附件块） */
 const hasContent = ref(false)
 
 function updateHasContent(e: any) {
   const text = e.getText().trim()
-  const html = e.getHTML()
-  hasContent.value = text.length > 0 || html.includes('<img')
+  let embed = false
+  e.state.doc.descendants((node: { type: { name: string } }) => {
+    if (node.type.name === 'image' || node.type.name === 'composerAttachment')
+      embed = true
+  })
+  hasContent.value = text.length > 0 || embed
+  hasEmbed.value = embed
+  emit('embed-change', embed)
 }
 
-/** 待回收的内联图片 Blob URL 列表 */
-const inlineImageBlobUrls = new Set<string>()
+/** 待回收的媒体 Blob URL */
+const inlineMediaBlobUrls = new Set<string>()
+
+/** blob URL → 原始文件。发送时必须交出 File，不能把 blob: 地址当成远程 URL */
+const inlineMediaFiles = new Map<string, File>()
+
+function countComposerSegments(): number {
+  return collectRichSegments().length
+}
+
+function rememberMediaFile(file: File): string {
+  const url = URL.createObjectURL(file)
+  inlineMediaBlobUrls.add(url)
+  inlineMediaFiles.set(url, file)
+  return url
+}
+
+function insertComposerFiles(files: File[]) {
+  if (props.mediaDisabled || !editor.value || files.length === 0)
+    return
+  let remaining = COMPOSER_SEGMENT_LIMIT - countComposerSegments()
+  if (remaining <= 0) {
+    showToast(t('chat.input.multiBodyLimit'), 'error')
+    return
+  }
+  const chain = editor.value.chain().focus()
+  let overflow = false
+  for (const file of files) {
+    const kind = classifyComposerFile(file)
+    if (kind === 'image' && features.value.image === false)
+      continue
+    if (kind === 'video' && features.value.video === false)
+      continue
+    if (kind === 'file' && features.value.file === false)
+      continue
+    if (remaining <= 0) {
+      overflow = true
+      break
+    }
+    const url = rememberMediaFile(file)
+    if (kind === 'image') {
+      chain.insertContent({ type: 'image', attrs: { src: url } })
+    }
+    else {
+      chain.insertContent({
+        type: 'composerAttachment',
+        attrs: {
+          src: url,
+          kind,
+          filename: file.name,
+          filesize: file.size,
+        },
+      })
+    }
+    remaining -= 1
+  }
+  chain.run()
+  editor.value.commands.focus('end')
+  if (overflow)
+    showToast(t('chat.input.multiBodyLimit'), 'error')
+}
+
+/** 媒体块被选中时，把字符写进它后面的段落。 */
+function typeAfterMedia(afterPos: number, text: string) {
+  const current = editor.value
+  if (!current)
+    return
+  const $pos = current.state.doc.resolve(afterPos)
+  const after = $pos.nodeAfter
+  if (after?.type.name === 'paragraph') {
+    current.chain().setTextSelection(afterPos + 1).insertContent(text).focus().run()
+    return
+  }
+  current.chain().insertContentAt(afterPos, {
+    type: 'paragraph',
+    content: [{ type: 'text', text }],
+  }).focus().run()
+}
+
+function pushMediaSegment(src: string, kind: 'image' | 'file' | 'video') {
+  const file = inlineMediaFiles.get(src)
+  if (kind === 'image')
+    return { type: 'image' as const, file, url: src }
+  if (kind === 'video' && file)
+    return { type: 'video' as const, file }
+  if (file)
+    return { type: 'file' as const, file }
+  return undefined
+}
+
+/** 按文档顺序收集文本、图片、文件、视频。媒体节点会先冲掉前面的文本缓冲。 */
+function collectRichSegments(): ComposerSegment[] {
+  const current = editor.value
+  if (!current)
+    return []
+  const segments: ComposerSegment[] = []
+  let buffer = ''
+  const flush = () => {
+    const content = buffer.replace(/\u00a0/g, ' ').replace(/^\s+|\s+$/g, '')
+    if (content)
+      segments.push({ type: 'text', content })
+    buffer = ''
+  }
+  const takeMedia = (kind: 'image' | 'file' | 'video', src: string) => {
+    flush()
+    const segment = pushMediaSegment(src, kind)
+    if (segment)
+      segments.push(segment)
+  }
+  current.state.doc.forEach((block) => {
+    if (block.type.name === 'image') {
+      takeMedia('image', String(block.attrs.src || ''))
+      return
+    }
+    if (block.type.name === 'composerAttachment') {
+      takeMedia(block.attrs.kind === 'video' ? 'video' : 'file', String(block.attrs.src || ''))
+      return
+    }
+    if (buffer)
+      buffer += '\n'
+    block.descendants((node) => {
+      if (node.isText) {
+        buffer += node.text || ''
+        return false
+      }
+      if (node.type.name === 'hardBreak') {
+        buffer += '\n'
+        return false
+      }
+      if (node.type.name === 'image') {
+        takeMedia('image', String(node.attrs.src || ''))
+        return false
+      }
+      if (node.type.name === 'composerAttachment') {
+        takeMedia(node.attrs.kind === 'video' ? 'video' : 'file', String(node.attrs.src || ''))
+        return false
+      }
+      return true
+    })
+  })
+  flush()
+  return segments
+}
+
+function releaseInlineMedia() {
+  inlineMediaBlobUrls.forEach(url => URL.revokeObjectURL(url))
+  inlineMediaBlobUrls.clear()
+  inlineMediaFiles.clear()
+}
 
 /** 发送消息 */
 function handleSend() {
-  if (!editor.value || !hasContent.value)
+  if (!editor.value)
+    return
+  const segments = collectRichSegments()
+  if (segments.length === 0 && !hasContent.value)
     return
   const html = editor.value.getHTML()
   const text = editor.value.getText()
-  // 过滤出实际出现在文本中的 mention（精确匹配，防止删除后残留/前缀误判）
   const activeMentions = filterActiveMentions(text, mentionList.value)
-  emit('send', html, text, activeMentions.length > 0 ? activeMentions : undefined)
+  emit('send', html, text, activeMentions.length > 0 ? activeMentions : undefined, segments)
   editor.value.commands.clearContent()
-  // 发送后回收内联图片 blob URL
-  inlineImageBlobUrls.forEach(url => URL.revokeObjectURL(url))
-  inlineImageBlobUrls.clear()
+  releaseInlineMedia()
   mentionList.value = []
+  hasContent.value = false
+  hasEmbed.value = false
+  emit('embed-change', false)
 }
 
 /** 表情按钮 ref */
@@ -300,26 +507,18 @@ const fileInputRef = ref<HTMLInputElement>()
 const videoInputRef = ref<HTMLInputElement>()
 
 function triggerFileInput(type: 'image' | 'file' | 'video') {
+  if (props.mediaDisabled)
+    return
   const ref = type === 'image' ? imageInputRef : type === 'video' ? videoInputRef : fileInputRef
   ref.value?.click()
 }
 
-function onFileSelected(type: 'image' | 'file' | 'video', event: Event) {
+function onFileSelected(_type: 'image' | 'file' | 'video', event: Event) {
   const files = (event.target as HTMLInputElement).files
   if (!files || files.length === 0)
     return
-
-  if (type === 'image') {
-    const file = files[0]
-    const url = URL.createObjectURL(file)
-    inlineImageBlobUrls.add(url)
-    editor.value?.chain().focus().setImage({ src: url }).run()
-    ;(event.target as HTMLInputElement).value = ''
-  }
-  else {
-    emit('send-file', type, files)
-    ;(event.target as HTMLInputElement).value = ''
-  }
+  insertComposerFiles(Array.from(files))
+  ;(event.target as HTMLInputElement).value = ''
 }
 
 /** 语音录制 */
@@ -400,8 +599,7 @@ defineExpose({
 /** 组件卸载时销毁编辑器并回收 Blob URL */
 onBeforeUnmount(() => {
   editor.value?.destroy()
-  inlineImageBlobUrls.forEach(url => URL.revokeObjectURL(url))
-  inlineImageBlobUrls.clear()
+  releaseInlineMedia()
   if (typingThrottleTimer) {
     clearTimeout(typingThrottleTimer)
     typingThrottleTimer = null
@@ -425,13 +623,13 @@ onBeforeUnmount(() => {
       <div v-if="features.emoji" ref="emojiBtnRef" class="rich-input__tool-btn" @click="onEmojiClick">
         <Icon name="circle/face" :size="20" />
       </div>
-      <div v-if="features.image" class="rich-input__tool-btn" @click="triggerFileInput('image')">
+      <div v-if="features.image && !mediaDisabled" class="rich-input__tool-btn" @click="triggerFileInput('image')">
         <Icon name="rect/img" :size="20" />
       </div>
-      <div v-if="features.video" class="rich-input__tool-btn" @click="triggerFileInput('video')">
+      <div v-if="features.video && !mediaDisabled" class="rich-input__tool-btn" @click="triggerFileInput('video')">
         <Icon name="rect/triangle" :size="20" />
       </div>
-      <div v-if="features.file" class="rich-input__tool-btn" @click="triggerFileInput('file')">
+      <div v-if="features.file && !mediaDisabled" class="rich-input__tool-btn" @click="triggerFileInput('file')">
         <Icon name="file/empty" :size="20" />
       </div>
       <div v-if="features.translation" class="rich-input__tool-btn" :title="t('chat.input.translate', '翻译')" @click="emit('translation-click')">
@@ -498,6 +696,7 @@ onBeforeUnmount(() => {
       ref="imageInputRef"
       type="file"
       accept="image/*"
+      multiple
       style="display: none"
       @change="onFileSelected('image', $event)"
     >
@@ -505,12 +704,14 @@ onBeforeUnmount(() => {
       ref="videoInputRef"
       type="file"
       accept="video/*"
+      multiple
       style="display: none"
       @change="onFileSelected('video', $event)"
     >
     <input
       ref="fileInputRef"
       type="file"
+      multiple
       style="display: none"
       @change="onFileSelected('file', $event)"
     >
@@ -537,22 +738,70 @@ onBeforeUnmount(() => {
   background-color: var(--rich-input-selection-color, revert);
 }
 
-.rich-input__editor-content p {
-  margin: 0 0 8px;
+.rich-input__editor-content p,
+.rich-input__editor-content .rich-input__image,
+.rich-input__editor-content .rich-input__attachment {
+  margin: 0 0 4px;
 }
 
-.rich-input__editor-content p:last-child {
+.rich-input__editor-content > :last-child {
   margin-bottom: 0;
 }
 
 .rich-input__editor-content img {
-  max-width: 100%;
-  border-radius: var(--uikit-components-radius, 4px);
-  display: inline-block;
+  display: block;
+  max-width: 240px;
+  max-height: 240px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  user-select: none;
+  border-radius: var(--uikit-bubble-radius, 16px);
+}
+
+/* 关掉 ProseMirror 选中原子节点时的浅蓝描边，改用右上角删除按钮 */
+.rich-input__editor-content .ProseMirror-selectednode,
+.rich-input__editor-content img.ProseMirror-selectednode,
+.rich-input__editor-content [data-node-view-wrapper].ProseMirror-selectednode {
+  outline: none !important;
+  box-shadow: none;
+}
+
+.rich-input__media-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: var(--uikit-text-secondary);
+  cursor: pointer;
+  background-color: var(--uikit-input-bg, #fff);
+  border: 0;
+  border-radius: 50%;
 }
 
 .rich-input__editor-content.ProseMirror-focused {
   outline: none;
+}
+
+.rich-input__editor-content .ProseMirror-gapcursor {
+  display: none;
+  pointer-events: none;
+  position: absolute;
+}
+
+.rich-input__editor-content .ProseMirror-gapcursor:after {
+  content: '';
+  display: block;
+  position: absolute;
+  top: -2px;
+  width: 20px;
+  border-top: 1px solid var(--uikit-text-primary);
 }
 </style>
 

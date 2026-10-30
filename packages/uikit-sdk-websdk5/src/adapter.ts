@@ -1385,6 +1385,9 @@ export class Websdk5Adapter implements SdkAdapter {
       sendCombine: (conversationId, conversationType, title, summary, messageList, ext) =>
         messageDomain.sendCombine(conversationId, conversationType, title, summary, '', messageList, ext),
 
+      sendMultiBody: (conversationId, conversationType, bodies, ext, needReadReceipt) =>
+        messageDomain.sendMultiBody(conversationId, conversationType, bodies, ext, needReadReceipt),
+
       recall: (conversationId, conversationType, messageId) =>
         messageDomain.recall(conversationId, conversationType, messageId),
 

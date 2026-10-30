@@ -100,6 +100,7 @@ const {
   sendAudioMessage,
   sendVideoMessage,
   sendLocationMessage,
+  sendMultiBodyMessage,
 } = useChat()
 const { stores, domains, h5, client, capabilities } = useUIKit()
 const { sendChannelAck, saveDraft, loadDraft, clearDraft, clearChatHistory, deleteConversation, selectConversation } = useConversation()
@@ -140,6 +141,7 @@ provideChatPluginContext({
     sendAudioMessage: (file, duration, ext) => sendAudioMessage(file, duration, groupReadReceiptConfig.value, ext),
     sendVideoMessage: (file, duration, ext) => sendVideoMessage(file, duration, groupReadReceiptConfig.value, ext),
     sendLocationMessage: (body, ext) => sendLocationMessage(body.latitude, body.longitude, body.address, ext),
+    sendMultiBodyMessage: (bodies, ext) => sendMultiBodyMessage(bodies, groupReadReceiptConfig.value, ext),
   },
   getUserDisplayName,
   getUserAvatar,

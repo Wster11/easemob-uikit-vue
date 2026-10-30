@@ -1,7 +1,7 @@
 import { computed, ref, toRaw } from 'vue'
 import type { SdkMessage } from '@easemob-community/uikit-sdk-contract'
 import { CONVERSATION_TYPE, MESSAGE_TYPE } from '@easemob-community/uikit-core'
-import type { CombineMessageBody, CustomMessageBody, FileMessageBody, ImageMessageBody, LocationMessageBody, TextMessageBody, UiConversation, UiMessage, VideoMessageBody, VoiceMessageBody } from '@easemob-community/uikit-core'
+import type { CombineMessageBody, CustomMessageBody, FileMessageBody, ImageMessageBody, LocationMessageBody, MultiBodySegment, MultiBodySegmentInput, TextMessageBody, UiConversation, UiMessage, VideoMessageBody, VoiceMessageBody } from '@easemob-community/uikit-core'
 import { createLogger } from '@easemob-community/uikit-core'
 import { chineseMessagePreviewLabels, resolveLastMessageText, resolveSenderDisplayName } from '../utils/resolve-last-message-text'
 import { useLocale } from '@easemob-community/uikit-core'
@@ -19,6 +19,127 @@ const combineLogger = createLogger('Combine')
  */
 const MAX_COMBINE_ITEMS = 300
 const MAX_COMBINE_LEVEL = 10
+
+/** 转发时只用已上传的远程地址，本地 blob 预览不能再次发给 SDK */
+function pickRemoteUrl(...urls: Array<string | undefined>): string | undefined {
+  return urls.find(url => typeof url === 'string' && url.length > 0 && !url.startsWith('blob:'))
+}
+
+function positiveNumber(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+function optionalText(value: string | undefined): string | undefined {
+  return value && value.length > 0 ? value : undefined
+}
+
+/** 把已收到的复合消息分段还原成可再次发送的输入。缺远程地址的媒体段会被丢掉。 */
+function toForwardMultiBodySegments(body: UiMessage['body']): MultiBodySegmentInput[] | undefined {
+  if (!Array.isArray(body))
+    return undefined
+  const segments: MultiBodySegmentInput[] = []
+  for (const item of body) {
+    if (!item || typeof item !== 'object' || !('type' in item))
+      continue
+    const segment = item as MultiBodySegment
+    switch (segment.type) {
+      case MESSAGE_TYPE.TEXT: {
+        const content = optionalText(segment.content)
+        if (content)
+          segments.push({ type: MESSAGE_TYPE.TEXT, content })
+        break
+      }
+      case MESSAGE_TYPE.IMAGE: {
+        const originalUrl = pickRemoteUrl(segment.originalImageUrl, segment.bigImageUrl, segment.thumbnailUrl, segment.localUrl)
+        if (!originalUrl)
+          break
+        segments.push({
+          type: MESSAGE_TYPE.IMAGE,
+          originalUrl,
+          filename: optionalText(segment.filename),
+          filetype: optionalText(segment.filetype),
+          width: positiveNumber(segment.width),
+          height: positiveNumber(segment.height),
+          isGif: segment.isGif,
+          isOriginalImage: segment.isOriginalImage,
+          fileLength: positiveNumber(segment.fileLength),
+          thumbnailUrl: optionalText(segment.thumbnailUrl),
+        })
+        break
+      }
+      case MESSAGE_TYPE.FILE: {
+        const originalUrl = pickRemoteUrl(segment.url)
+        if (!originalUrl)
+          break
+        segments.push({
+          type: MESSAGE_TYPE.FILE,
+          originalUrl,
+          filename: optionalText(segment.filename),
+          filetype: optionalText(segment.filetype),
+          fileSize: positiveNumber(segment.fileSize ?? segment.fileLength),
+          fileLength: positiveNumber(segment.fileLength),
+        })
+        break
+      }
+      case MESSAGE_TYPE.VOICE: {
+        const originalUrl = pickRemoteUrl(segment.url)
+        const duration = positiveNumber(segment.duration)
+        if (!originalUrl || duration === undefined)
+          break
+        segments.push({
+          type: MESSAGE_TYPE.VOICE,
+          originalUrl,
+          filename: optionalText(segment.filename),
+          filetype: optionalText(segment.filetype),
+          duration,
+          fileLength: positiveNumber(segment.fileLength),
+        })
+        break
+      }
+      case MESSAGE_TYPE.VIDEO: {
+        const originalUrl = pickRemoteUrl(segment.url)
+        const duration = positiveNumber(segment.duration)
+        if (!originalUrl || duration === undefined)
+          break
+        segments.push({
+          type: MESSAGE_TYPE.VIDEO,
+          originalUrl,
+          filename: optionalText(segment.filename),
+          filetype: optionalText(segment.filetype),
+          duration,
+          width: positiveNumber(segment.width),
+          height: positiveNumber(segment.height),
+          fileLength: positiveNumber(segment.fileLength),
+          thumbnailUrl: optionalText(segment.thumbnailUrl),
+        })
+        break
+      }
+      case MESSAGE_TYPE.LOCATION:
+        segments.push({
+          type: MESSAGE_TYPE.LOCATION,
+          latitude: segment.latitude,
+          longitude: segment.longitude,
+          address: segment.address,
+          buildingName: segment.buildingName,
+        })
+        break
+      case MESSAGE_TYPE.CUSTOM: {
+        const event = optionalText(segment.event)
+        if (!event)
+          break
+        segments.push({
+          type: MESSAGE_TYPE.CUSTOM,
+          event,
+          params: segment.params ? JSON.parse(JSON.stringify(toRaw(segment.params))) : undefined,
+        })
+        break
+      }
+      default:
+        break
+    }
+  }
+  return segments
+}
 
 /**
  * 将 UiMessage 转换为干净的 SDK Message 对象。
@@ -191,6 +312,14 @@ export function useChat() {
       case MESSAGE_TYPE.COMBINE:
         // 合并消息逐条转发：作为单个合并消息重新发送
         return forwardCombineMessages([message], target)
+      case MESSAGE_TYPE.MULTI_BODY: {
+        const bodies = toForwardMultiBodySegments(message.body)
+        if (!bodies || bodies.length < 2) {
+          showToast(t('message.forward.noValidMessages'), 'warning')
+          return
+        }
+        return domains.message.sendMultiBody(id, type, bodies, ext)
+      }
       default:
         combineLogger.warn('[useChat] forwardMessage: unsupported type', message.type)
     }
@@ -280,6 +409,7 @@ export function useChat() {
     sendVideoMessage: send.sendVideoMessage,
     sendLocationMessage: send.sendLocationMessage,
     sendCustomMessage: send.sendCustomMessage,
+    sendMultiBodyMessage: send.sendMultiBodyMessage,
     sendCmdMessage: send.sendCmdMessage,
     resendMessage: send.resendMessage,
 

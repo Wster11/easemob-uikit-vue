@@ -11,6 +11,7 @@ import FileMessage from './file-message.vue'
 import CombineMessage from './combine-message.vue'
 import CustomMessage from './custom-message.vue'
 import LocationMessage from './location-message.vue'
+import MultiBodyMessage from './multi-body-message.vue'
 
 export interface MessageRendererProps {
   message: UiMessage
@@ -37,6 +38,7 @@ const messageComponentMap: Record<string, Component> = {
   [MESSAGE_TYPE.COMBINE]: CombineMessage,
   [MESSAGE_TYPE.CUSTOM]: CustomMessage,
   [MESSAGE_TYPE.LOCATION]: LocationMessage,
+  [MESSAGE_TYPE.MULTI_BODY]: MultiBodyMessage,
 }
 
 /** 当前消息对应的渲染组件 */

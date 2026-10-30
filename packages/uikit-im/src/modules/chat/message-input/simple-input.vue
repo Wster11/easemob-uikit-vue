@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useLocale } from '@easemob-community/uikit-core'
+import { MESSAGE_TYPE, useLocale, useToast } from '@easemob-community/uikit-core'
 import { useResizable, useViewport } from '@easemob-community/uikit-core'
 import { filterActiveMentions } from '../../../utils/mention'
-import { EmInput as Input } from '@easemob-community/uikit-core'
 import { EmButton as Button } from '@easemob-community/uikit-core'
 import { EmIcon as Icon } from '@easemob-community/uikit-core'
 import type { ChatConfig, MentionContact } from '../types'
 import VoicePanel from './components/voice-panel.vue'
+import ComposerEmbed from './composer-embed.vue'
+import { filesFromDataTransfer, filterComposerFiles, type ComposerSegment } from './composer-segment'
+import { useComposerBlocks } from './use-composer-blocks'
 
 export interface SimpleInputProps {
   config?: ChatConfig['input']
@@ -15,15 +17,14 @@ export interface SimpleInputProps {
   enableMention?: boolean
   /** @提及选择弹层是否打开（打开时 Enter 优先用于选择联系人，不发送消息） */
   mentionOpen?: boolean
+  /** 编辑文字时禁止插入媒体 */
+  mediaDisabled?: boolean
 }
 
 const props = defineProps<SimpleInputProps>()
 
 const emit = defineEmits<{
-  (e: 'send', text: string, mentionList?: MentionContact[]): void
-  (e: 'send-file', type: 'image' | 'file' | 'video', files: FileList): void
-  /** 粘贴剪贴板图片（截图/复制的图片），交由上层弹窗预览后发送 */
-  (e: 'image-paste', files: File[]): void
+  (e: 'send', text: string, mentionList?: MentionContact[], segments?: ComposerSegment[]): void
   (e: 'emoji-click', anchor: HTMLElement): void
   (e: 'voice-start'): void
   (e: 'voice-end', duration: number): void
@@ -45,10 +46,8 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useLocale()
+const { show: showToast } = useToast()
 const { isMobile } = useViewport()
-
-/** 输入文本 */
-const text = ref('')
 
 /** 输入框风格 */
 const style = computed(() => props.config?.style ?? 'toolbar-top')
@@ -115,9 +114,15 @@ const { size: resizeSize, isResizing } = useResizable(resizeHandleRef, {
 })
 
 /** 根元素样式：内联 height 作为 flex-basis（flex: 1 1 auto 保留收缩能力，引用条在场时输入区可被挤压；过渡动画作用于 height） */
-const rootStyle = computed<Record<string, string>>(() => ({
-  height: `${effectiveHeight.value}px`,
-}))
+const rootStyle = computed<Record<string, string>>(() => {
+  if (hasMedia.value && customHeight.value === null) {
+    return {
+      height: 'auto',
+      minHeight: `${defaultContentHeight.value}px`,
+    }
+  }
+  return { height: `${effectiveHeight.value}px` }
+})
 
 /** 同步拖拽起始尺寸为当前根元素实际高度（避免首次拖拽从 initial 跳变；过渡动画中调用取到中间值，恰好是继续拖拽的正确起点） */
 function syncResizeSize() {
@@ -135,9 +140,6 @@ function toggleExpand() {
   syncResizeSize()
   getInputEl()?.focus()
 }
-
-/** 是否使用多行文本 */
-const isMultiline = computed(() => !isMobile.value)
 
 /** 光标颜色：默认跟随主题色 */
 const caretColorVar = computed(() => props.config?.caretColor || 'var(--uikit-primary)')
@@ -163,19 +165,51 @@ watch(isVoiceMode, val => emit('voice-mode-change', val))
 /** 已插入的 @提及列表 */
 const mentionList = ref<MentionContact[]>([])
 
+const {
+  blocks,
+  activeTextId,
+  hasMedia,
+  hasContent,
+  activeTextBlock,
+  focusText,
+  insertFiles,
+  removeBlock,
+  resetBlocks,
+  collect,
+  getText: getComposerText,
+  setText: setComposerText,
+} = useComposerBlocks({
+  mediaDisabled: () => !!props.mediaDisabled,
+  features: () => ({
+    image: features.value.image,
+    file: features.value.file,
+    video: features.value.video,
+  }),
+  onOverflow: () => showToast(t('chat.input.multiBodyLimit'), 'error'),
+})
+
+const textareaRefs = new Map<string, HTMLTextAreaElement>()
+
+function setTextareaRef(id: string, el: unknown) {
+  if (el instanceof HTMLTextAreaElement)
+    textareaRefs.set(id, el)
+  else
+    textareaRefs.delete(id)
+}
+
 /** 发送消息 */
 function handleSend() {
   // @提及弹层打开时，Enter 优先交给弹层选择联系人，不发送消息
   if (props.mentionOpen)
     return
-  const trimmed = text.value.trim()
-  if (!trimmed) {
+  const segments = collect()
+  if (segments.length === 0)
     return
-  }
+  const trimmed = getComposerText().trim()
   // 过滤出实际出现在文本中的 mention（精确匹配，防止删除后残留/前缀误判）
   const activeMentions = filterActiveMentions(trimmed, mentionList.value)
-  emit('send', trimmed, activeMentions.length > 0 ? activeMentions : undefined)
-  text.value = ''
+  emit('send', trimmed, activeMentions.length > 0 ? activeMentions : undefined, segments)
+  resetBlocks()
   mentionList.value = []
 }
 
@@ -220,45 +254,51 @@ const fileInputRef = ref<HTMLInputElement>()
 const videoInputRef = ref<HTMLInputElement>()
 
 function triggerFileInput(type: 'image' | 'file' | 'video') {
+  if (props.mediaDisabled)
+    return
   const ref = type === 'image' ? imageInputRef : type === 'video' ? videoInputRef : fileInputRef
   ref.value?.click()
 }
 
-function onFileSelected(type: 'image' | 'file' | 'video', event: Event) {
-  const files = (event.target as HTMLInputElement).files
-  if (files && files.length > 0) {
-    emit('send-file', type, files)
-    ;(event.target as HTMLInputElement).value = ''
-  }
+function currentCursor(): number {
+  return getInputEl()?.selectionStart ?? activeTextBlock()?.content.length ?? 0
 }
 
-/**
- * 粘贴事件（挂在根元素，textarea/EmInput 的 paste 均冒泡至此）：
- * 剪贴板含图片时拦截默认行为，提取 image/* 文件交给上层弹窗预览后发送；
- * 纯文本粘贴不受影响。
- */
+function insertComposerFiles(files: File[]) {
+  insertFiles(files, currentCursor())
+  nextTick(() => getInputEl()?.focus())
+}
+
+function onFileSelected(_type: 'image' | 'file' | 'video', event: Event) {
+  const files = (event.target as HTMLInputElement).files
+  if (files && files.length > 0)
+    insertComposerFiles(Array.from(files))
+  ;(event.target as HTMLInputElement).value = ''
+}
+
+/** 粘贴 / 拖放本地文件时按光标插入，纯文本粘贴不受影响。 */
 function onPaste(e: ClipboardEvent) {
-  const data = e.clipboardData
-  if (!data)
-    return
-  const files: File[] = []
-  for (const item of Array.from(data.items)) {
-    if (item.kind === 'file' && item.type.startsWith('image/')) {
-      const file = item.getAsFile()
-      if (file)
-        files.push(file)
-    }
-  }
+  const files = filterComposerFiles(
+    filesFromDataTransfer(e.clipboardData),
+    {
+      image: features.value.image,
+      file: features.value.file,
+      video: features.value.video,
+    },
+    props.config?.pasteImagePreview !== false,
+  )
   if (files.length === 0)
     return
-  // image 功能或粘贴预览特性关闭：剪贴板同时带文本时放行文本粘贴，纯图则拦截丢弃
-  if (!features.value.image || props.config?.pasteImagePreview === false) {
-    if (!data.getData('text/plain'))
-      e.preventDefault()
-    return
-  }
   e.preventDefault()
-  emit('image-paste', files)
+  insertComposerFiles(files)
+}
+
+function onDrop(e: DragEvent) {
+  const files = filesFromDataTransfer(e.dataTransfer)
+  if (files.length === 0)
+    return
+  e.preventDefault()
+  insertComposerFiles(files)
 }
 
 /** 移动端语音录制（保持原有点击切换行为） */
@@ -299,13 +339,9 @@ function closePanel() {
   showPanel.value = false
 }
 
-/** 输入框元素引用（textarea 或 Input 组件实例） */
-const textareaRef = ref<HTMLTextAreaElement>()
-const inputComponentRef = ref<InstanceType<typeof Input>>()
-
-/** 获取底层 input/textarea 元素 */
-function getInputEl(): HTMLInputElement | HTMLTextAreaElement | undefined {
-  return textareaRef.value || inputComponentRef.value?.inputRef || undefined
+/** 获取当前聚焦的 textarea */
+function getInputEl(): HTMLTextAreaElement | undefined {
+  return textareaRefs.get(activeTextId.value)
 }
 
 /** 获取 textarea/input 光标像素坐标 */
@@ -403,7 +439,9 @@ function insertMention(contact: MentionContact) {
 
   const before = value.substring(0, atPos)
   const after = value.substring(pos)
-  text.value = `${before}@${contact.name} ${after}`
+  const block = activeTextBlock()
+  if (block)
+    block.content = `${before}@${contact.name} ${after}`
 
   // 记录 mention
   if (!mentionList.value.find(m => m.userId === contact.userId)) {
@@ -423,14 +461,17 @@ function appendMention(contact: MentionContact) {
   const el = getInputEl()
   if (!el)
     return
-  const prefix = text.value.length > 0 && !text.value.endsWith(' ') ? ' ' : ''
-  text.value = `${text.value}${prefix}@${contact.name} `
+  const block = activeTextBlock()
+  if (!block)
+    return
+  const prefix = block.content.length > 0 && !block.content.endsWith(' ') ? ' ' : ''
+  block.content = `${block.content}${prefix}@${contact.name} `
   if (!mentionList.value.find(m => m.userId === contact.userId)) {
     mentionList.value.push(contact)
   }
   nextTick(() => {
     el.focus()
-    const newPos = text.value.length
+    const newPos = block.content.length
     el.setSelectionRange(newPos, newPos)
   })
 }
@@ -453,7 +494,9 @@ function insertEmoji(emoji: string) {
   const end = el.selectionEnd || 0
   const value = el.value
 
-  text.value = value.substring(0, start) + emoji + value.substring(end)
+  const block = activeTextBlock()
+  if (block)
+    block.content = value.substring(0, start) + emoji + value.substring(end)
 
   nextTick(() => {
     const newPos = start + emoji.length
@@ -483,7 +526,7 @@ onBeforeUnmount(() => {
 
 /** 设置输入文本 */
 function setText(value: string) {
-  text.value = value
+  setComposerText(value)
   mentionList.value = []
   nextTick(() => {
     const el = getInputEl()
@@ -493,7 +536,7 @@ function setText(value: string) {
 
 /** 获取当前输入文本 */
 function getText(): string {
-  return text.value
+  return getComposerText()
 }
 
 /** 暴露方法（toggleExpand/expanded 供上层在卡片层渲染右上角展开角标） */
@@ -516,22 +559,25 @@ defineExpose({
       'simple-input--toolbar-bottom': style === 'toolbar-bottom',
       'simple-input--toolbar-top': style === 'toolbar-top',
       'simple-input--resizing': isResizing,
+      'simple-input--has-embed': hasMedia,
     }"
     :style="rootStyle"
     @paste="onPaste"
+    @dragover.prevent
+    @drop.prevent="onDrop"
   >
     <!-- 工具栏：表情 / 图片 / 视频 / 文件 / 翻译 / 名片 / 语音（设计稿 msg_input 顺序），图标视觉间距 16px -->
     <div class="simple-input__toolbar">
       <div v-if="features.emoji" ref="emojiBtnRef" class="simple-input__tool-btn" @click="onEmojiClick">
         <Icon name="circle/face" :size="20" />
       </div>
-      <div v-if="features.image" class="simple-input__tool-btn" @click="triggerFileInput('image')">
+      <div v-if="features.image && !mediaDisabled" class="simple-input__tool-btn" @click="triggerFileInput('image')">
         <Icon name="rect/img" :size="20" />
       </div>
-      <div v-if="features.video" class="simple-input__tool-btn" @click="triggerFileInput('video')">
+      <div v-if="features.video && !mediaDisabled" class="simple-input__tool-btn" @click="triggerFileInput('video')">
         <Icon name="rect/triangle" :size="20" />
       </div>
-      <div v-if="features.file" class="simple-input__tool-btn" @click="triggerFileInput('file')">
+      <div v-if="features.file && !mediaDisabled" class="simple-input__tool-btn" @click="triggerFileInput('file')">
         <Icon name="folder" :size="20" />
       </div>
       <div v-if="features.translation" class="simple-input__tool-btn" :title="t('chat.input.translate', '翻译')" @click="emit('translation-click')">
@@ -549,30 +595,27 @@ defineExpose({
     <!-- 输入区域 -->
     <div class="simple-input__field-area">
       <!-- 正常输入（PC 端或移动端非录音模式） -->
-      <template v-if="!isMobileRecording">
-        <Input
-          v-if="!isMultiline"
-          ref="inputComponentRef"
-          v-model="text"
-          :placeholder="t('chat.placeholder')"
-          :maxlength="maxLengthValue"
-          class="simple-input__field"
-          @submit="handleSend"
-          @input="onInput"
-          @focus="emit('focus')"
-        />
-        <textarea
-          v-else
-          ref="textareaRef"
-          v-model="text"
-          class="simple-input__textarea"
-          :placeholder="t('chat.placeholder')"
-          :maxlength="maxLengthValue"
-          @keydown="onKeydown"
-          @input="onInput"
-          @focus="emit('focus')"
-        />
-      </template>
+      <div v-if="!isMobileRecording" class="simple-input__composer">
+        <template v-for="block in blocks" :key="block.id">
+          <textarea
+            v-if="block.type === MESSAGE_TYPE.TEXT"
+            :ref="(el) => setTextareaRef(block.id, el)"
+            v-model="block.content"
+            class="simple-input__textarea"
+            :placeholder="!hasMedia && !block.content ? t('chat.placeholder') : ''"
+            :maxlength="maxLengthValue"
+            rows="1"
+            @keydown="onKeydown"
+            @input="onInput"
+            @focus="focusText(block.id); emit('focus')"
+          />
+          <ComposerEmbed
+            v-else
+            :block="block"
+            @remove="removeBlock(block.id)"
+          />
+        </template>
+      </div>
 
       <!-- 移动端语音录制按钮 -->
       <div v-else class="simple-input__voice-btn-mobile">
@@ -601,7 +644,7 @@ defineExpose({
       <Button
         type="primary"
         size="small"
-        :disabled="!text.trim()"
+        :disabled="!hasContent"
         @click="handleSend"
       >
         {{ t('chat.send') }}
@@ -620,6 +663,7 @@ defineExpose({
       ref="imageInputRef"
       type="file"
       accept="image/*"
+      multiple
       style="display: none"
       @change="onFileSelected('image', $event)"
     >
@@ -627,12 +671,14 @@ defineExpose({
       ref="videoInputRef"
       type="file"
       accept="video/*"
+      multiple
       style="display: none"
       @change="onFileSelected('video', $event)"
     >
     <input
       ref="fileInputRef"
       type="file"
+      multiple
       style="display: none"
       @change="onFileSelected('file', $event)"
     >
@@ -704,6 +750,21 @@ defineExpose({
   align-items: stretch;
   gap: var(--uikit-container-gap, 8px);
   position: relative;
+}
+
+.simple-input__composer {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.simple-input--has-embed .simple-input__textarea {
+  flex: 0 0 auto;
+  min-height: 24px;
 }
 
 /* 拖拽手柄：输入卡片上边缘命中区（仅光标提示，不画视觉线）；上探过卡片 padding-top 与 1px border */

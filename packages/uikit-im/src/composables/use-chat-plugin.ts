@@ -1,5 +1,5 @@
 import { inject, provide, type InjectionKey, type ComputedRef } from 'vue'
-import type { LocationMessageBody, UiConversation, UiMessage } from '@easemob-community/uikit-core'
+import type { LocationMessageBody, MultiBodySegmentInput, UiConversation, UiMessage } from '@easemob-community/uikit-core'
 import type { MentionContact } from '../modules/chat/types'
 import { createLogger } from '@easemob-community/uikit-core'
 
@@ -21,6 +21,11 @@ export interface ChatPluginSendUtils {
   sendVideoMessage: (file: File, duration: number, ext?: Record<string, any>) => Promise<any>
   /** 发送位置消息 */
   sendLocationMessage: (body: LocationMessageBody, ext?: Record<string, any>) => Promise<any>
+  /**
+   * 发送复合消息（SDK multi_body）。bodies 为 2 到 20 段。
+   * Send a multi_body message. `bodies` must contain 2 to 20 segments.
+   */
+  sendMultiBodyMessage: (bodies: readonly MultiBodySegmentInput[], ext?: Record<string, any>) => Promise<any>
 }
 
 /** 聊天插件上下文 */

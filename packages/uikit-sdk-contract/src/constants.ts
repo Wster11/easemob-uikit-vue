@@ -25,6 +25,8 @@ export const MESSAGE_TYPE = {
   CUSTOM: 'custom',
   LOCATION: 'location',
   COMBINE: 'combine',
+  /** 复合消息：正文是 2 到 20 段可组合内容，SDK wire 值为 multi_body */
+  MULTI_BODY: 'multi_body',
   NOTICE: 'notice', // UIKit 本地通知消息（不走 SDK 消息流）
 } as const
 

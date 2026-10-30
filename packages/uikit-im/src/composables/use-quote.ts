@@ -1,6 +1,7 @@
 import { ref } from 'vue'
 import { MESSAGE_EXT_KEY, MESSAGE_TYPE } from '@easemob-community/uikit-core'
 import type { CustomMessageBody, FileMessageBody, ImageMessageBody, TextMessageBody, UiMessage, VoiceMessageBody } from '@easemob-community/uikit-core'
+import { formatMultiBodyPreview } from '@easemob-community/uikit-sdk-contract'
 import { chineseMessagePreviewLabels } from '../utils/resolve-last-message-text'
 
 /** 语音时长格式化：12'28''（分'秒''），与设计师引用样式稿一致 */
@@ -64,6 +65,8 @@ export function getQuotePreview(message: UiMessage): string {
     }
     case MESSAGE_TYPE.CMD:
       return '[指令]'
+    case MESSAGE_TYPE.MULTI_BODY:
+      return formatMultiBodyPreview(message.body, chineseMessagePreviewLabels)
     default:
       return '[消息]'
   }

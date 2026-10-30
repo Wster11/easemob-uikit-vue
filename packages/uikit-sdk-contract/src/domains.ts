@@ -2,6 +2,7 @@ import type { ConversationTypeValue } from './constants'
 import type { ContactPage, GroupMemberPage, GroupPage } from './repository'
 import type {
   CreateGroupParams,
+  MultiBodySegmentInput,
   SdkMessage,
   UiContact,
   UiConversation,
@@ -37,6 +38,11 @@ export interface SdkMessageDomain {
   sendCustom: (conversationId: string, conversationType: ConversationTypeValue, event: string, params?: Record<string, string>, ext?: Record<string, unknown>) => Promise<SdkMessage>
   sendCmd: (conversationId: string, conversationType: ConversationTypeValue, action: string, ext?: Record<string, unknown>) => Promise<SdkMessage>
   sendCombine: (conversationId: string, conversationType: ConversationTypeValue, title: string, summary: string, compatibleText: string, messageList: readonly SdkMessage[], ext?: Record<string, unknown>) => Promise<SdkMessage>
+  /**
+   * 发送复合消息（SDK multi_body）。bodies 为 2 到 20 段，由 adapter 调分段工厂后一次发出。
+   * Send a multi_body message. `bodies` must contain 2 to 20 segments.
+   */
+  sendMultiBody: (conversationId: string, conversationType: ConversationTypeValue, bodies: readonly MultiBodySegmentInput[], ext?: Record<string, unknown>, needReadReceipt?: boolean) => Promise<SdkMessage>
   fetchHistory: (conversationId: string, conversationType: ConversationTypeValue, cursor?: string, pageSize?: number) => Promise<{ list: UiMessage[], cursor?: string, hasMore: boolean }>
   recall: (conversationId: string, conversationType: ConversationTypeValue, messageId: string) => Promise<void>
   /**

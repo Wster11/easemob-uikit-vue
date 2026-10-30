@@ -4,6 +4,7 @@ import type {
   ConversationTypeValue,
   MessagePersistenceHooks,
   MessageRepository,
+  MultiBodySegmentInput,
   SdkMessage,
   UiMessage,
 } from '@easemob-community/uikit-sdk-contract'
@@ -322,6 +323,16 @@ export class MessageDomain {
       ext,
     } as EasemobChat.CreateCombineMsgParameters) as EasemobChat.CombineMsgBody
     return this._send(body)
+  }
+
+  async sendMultiBody(
+    _conversationId: string,
+    _conversationType: ConversationTypeValue,
+    _bodies: readonly MultiBodySegmentInput[],
+    _ext?: Record<string, unknown>,
+    _needReadReceipt?: boolean,
+  ): Promise<SdkMessage> {
+    throw new Error('multi_body messages are not supported by the webim4 adapter')
   }
 
   /**

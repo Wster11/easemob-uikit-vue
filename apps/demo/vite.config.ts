@@ -47,6 +47,10 @@ function getUIKitSdkWebsdk5Version(): string {
   return pkg.version ?? 'unknown'
 }
 
+// 本地调试：easemob-websdk 经根 package.json 的 pnpm.overrides link 到 ../websdk2。
+// Vite 默认预构建并忽略 node_modules，这里放行该符号链接及其真实目录，改 dist 后能刷新。
+const localSdkRoot = resolve(__dirname, '../../../websdk2')
+
 const sdkVersion = getSdkVersion()
 const uikitVersion = getUIKitVersion()
 const uikitCoreVersion = getUIKitCoreVersion()
@@ -70,6 +74,14 @@ export default defineConfig({
     AutoImport({
       imports: ['vue'],
       dts: true,
+      // 传入 exclude 会替换插件默认值，node_modules / .git 必须保留。
+      // 本地 websdk2 在仓库外，realpath 不落在 node_modules 里；产物里的压缩变量 h
+      // 会被当成 Vue 的 h 自动 import，和 const h 撞名。
+      exclude: [
+        /[\\/]node_modules[\\/]/,
+        /[\\/]\.git[\\/]/,
+        /[\\/]websdk2[\\/]/,
+      ],
     }),
   ],
   resolve: {
@@ -91,5 +103,22 @@ export default defineConfig({
       // chatroom 场景包源码直连（P2-2 demo 页使用；chatroom 无独立主题，theme 子路径经 exports 指 core）
       { find: '@easemob-community/uikit-chatroom', replacement: resolve(__dirname, '../../packages/uikit-chatroom/src') },
     ],
+  },
+  optimizeDeps: {
+    exclude: ['easemob-websdk'],
+  },
+  server: {
+    watch: {
+      ignored: [
+        '**/.git/**',
+        '**/node_modules/**',
+        '!**/node_modules/easemob-websdk/**',
+        `!${localSdkRoot}/**`,
+      ],
+    },
+    fs: {
+      // 显式 allow 会替换 Vite 默认名单，必须保留仓库根目录
+      allow: [resolve(__dirname, '../..'), localSdkRoot],
+    },
   },
 })

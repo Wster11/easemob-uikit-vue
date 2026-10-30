@@ -1,5 +1,5 @@
 import type { Message as SdkMessage, VoiceMessageSource, VoiceParams } from 'easemob-websdk'
-import type { ConversationTypeValue, MessagePersistenceHooks, MessageRepository, MessageStatus, SdkMessage as NeutralSdkMessage, UiMessage } from '@easemob-community/uikit-sdk-contract'
+import type { ConversationTypeValue, MessagePersistenceHooks, MessageRepository, MessageStatus, MultiBodySegmentInput, SdkMessage as NeutralSdkMessage, UiMessage } from '@easemob-community/uikit-sdk-contract'
 import { CONVERSATION_TYPE, MESSAGE_STATUS, MESSAGE_TYPE, createLogger, isVoiceBody, normalizeUserId, toMessageRecord } from '@easemob-community/uikit-sdk-contract'
 import type { ManagerHost } from '../client'
 import { toUiMessage } from '../adapter/message-adapter'
@@ -132,6 +132,105 @@ function hydrateUiMessage(msg: NeutralSdkMessage, currentUserId: string): UiMess
     status: isSelf && msg.isPeerRead === true
       ? MESSAGE_STATUS.READ
       : (msg.sendStatus ?? MESSAGE_STATUS.SENT),
+  }
+}
+
+interface MultiBodyChatManager {
+  createTextMessageBody: (params: { content: string, targetLanguages?: string[] }) => object
+  createImageMessageBody: (params: Record<string, unknown>) => object
+  createFileMessageBody: (params: Record<string, unknown>) => object
+  createVoiceMessageBody: (params: Record<string, unknown>) => object
+  createVideoMessageBody: (params: Record<string, unknown>) => object
+  createLocationMessageBody: (params: { latitude: number, longitude: number, address?: string, buildingName?: string }) => object
+  createCustomMessageBody: (params: { event: string, params?: Record<string, string> }) => object
+  createMultiBodyMessage: (params: {
+    conversationId: string
+    conversationType: ConversationTypeValue
+    bodies: readonly object[]
+    ext?: Record<string, unknown>
+    needReadReceipt?: boolean
+  }) => SdkMessage
+}
+
+function definedFields(input: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined))
+}
+
+function isGifSource(data?: File, url?: string, flagged?: boolean): boolean {
+  if (flagged)
+    return true
+  if (data)
+    return data.type === 'image/gif' || /\.gif$/i.test(data.name)
+  return typeof url === 'string' && /\.gif(?:$|\?)/i.test(url)
+}
+
+/** 调 SDK 分段工厂。返回值必须原样进入 createMultiBodyMessage。 */
+async function toSdkMultiBodySegment(chat: MultiBodyChatManager, segment: MultiBodySegmentInput): Promise<object> {
+  switch (segment.type) {
+    case MESSAGE_TYPE.TEXT:
+      return chat.createTextMessageBody({
+        content: segment.content,
+        ...(segment.targetLanguages ? { targetLanguages: segment.targetLanguages } : {}),
+      })
+    case MESSAGE_TYPE.IMAGE:
+      return chat.createImageMessageBody(definedFields({
+        data: segment.data,
+        originalUrl: segment.originalUrl,
+        filename: segment.filename,
+        filetype: segment.filetype,
+        width: segment.width,
+        height: segment.height,
+        fileLength: segment.fileLength,
+        thumbnailUrl: segment.thumbnailUrl,
+        isOriginalImage: segment.isOriginalImage,
+        ...(isGifSource(segment.data, segment.originalUrl, segment.isGif) ? { isGif: true } : {}),
+      }))
+    case MESSAGE_TYPE.FILE:
+      return chat.createFileMessageBody(definedFields({
+        data: segment.data,
+        originalUrl: segment.originalUrl,
+        filename: segment.filename,
+        filetype: segment.filetype,
+        fileSize: segment.fileSize,
+        fileLength: segment.fileLength,
+      }))
+    case MESSAGE_TYPE.VOICE:
+      return chat.createVoiceMessageBody(definedFields({
+        data: segment.data,
+        originalUrl: segment.originalUrl,
+        filename: segment.filename,
+        filetype: segment.filetype,
+        duration: segment.duration,
+        fileLength: segment.fileLength,
+      }))
+    case MESSAGE_TYPE.VIDEO: {
+      const dimensions = segment.data && (segment.width == null || segment.height == null)
+        ? await readVideoDimensions(segment.data)
+        : undefined
+      return chat.createVideoMessageBody(definedFields({
+        data: segment.data,
+        originalUrl: segment.originalUrl,
+        filename: segment.filename,
+        filetype: segment.filetype,
+        duration: segment.duration,
+        width: segment.width ?? dimensions?.width,
+        height: segment.height ?? dimensions?.height,
+        fileLength: segment.fileLength,
+        thumbnailUrl: segment.thumbnailUrl,
+      }))
+    }
+    case MESSAGE_TYPE.LOCATION:
+      return chat.createLocationMessageBody({
+        latitude: segment.latitude,
+        longitude: segment.longitude,
+        ...(segment.address !== undefined ? { address: segment.address } : {}),
+        ...(segment.buildingName !== undefined ? { buildingName: segment.buildingName } : {}),
+      })
+    case MESSAGE_TYPE.CUSTOM:
+      return chat.createCustomMessageBody({
+        event: segment.event,
+        ...(segment.params ? { params: segment.params } : {}),
+      })
   }
 }
 
@@ -327,6 +426,29 @@ export class MessageDomain {
     combineLogger.info('createCombineMessage done', {
       items: messageList.length,
       elapsedMs: Math.round(performance.now() - t0),
+    })
+    return this._send(sdkMsg)
+  }
+
+  /**
+   * 发送复合消息。分段必须经 SDK 工厂创建后原样交给 createMultiBodyMessage，
+   * 本地文件挂在工厂返回的对象上，不能中途复制。
+   */
+  async sendMultiBody(
+    conversationId: string,
+    conversationType: ConversationTypeValue,
+    bodies: readonly MultiBodySegmentInput[],
+    ext?: Record<string, unknown>,
+    needReadReceipt?: boolean,
+  ) {
+    const chat = this.client.chatManager as MultiBodyChatManager
+    const segments = await Promise.all(bodies.map(segment => toSdkMultiBodySegment(chat, segment)))
+    const sdkMsg = chat.createMultiBodyMessage({
+      conversationId,
+      conversationType,
+      bodies: segments,
+      ext,
+      needReadReceipt,
     })
     return this._send(sdkMsg)
   }

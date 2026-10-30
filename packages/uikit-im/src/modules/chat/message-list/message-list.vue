@@ -14,6 +14,7 @@ import MessageBubbleWrapper from '../message-item/message-bubble-wrapper.vue'
 import GroupReadReceiptModal from '../group-read-receipt-modal/group-read-receipt-modal.vue'
 import { EmModal as Modal } from '@easemob-community/uikit-core'
 import type { FileMessageBody, LocationMessageBody, TextMessageBody, UiMessage } from '@easemob-community/uikit-core'
+import { multiBodyTextContent } from '../../../utils/resolve-last-message-text'
 import type { ChatConfig, MessageActionEvent } from '../types'
 import { useToast } from '@easemob-community/uikit-core'
 import { resolveVoiceToTextErrorMessage } from '../../../composables/use-message-actions'
@@ -582,7 +583,11 @@ function resolveTranslateErrorMessage(e: unknown): string {
 
 /** 通过 VueUse useClipboard 复制消息文本 */
 async function handleCopyMessage(message: UiMessage) {
-  const text = message.type === MESSAGE_TYPE.TEXT ? (message.body as TextMessageBody).content || '' : ''
+  const text = message.type === MESSAGE_TYPE.TEXT
+    ? (message.body as TextMessageBody).content || ''
+    : message.type === MESSAGE_TYPE.MULTI_BODY
+      ? multiBodyTextContent(message.body)
+      : ''
   if (!text) {
     showToast(t('message.copyFailed') ?? '复制失败', 'error')
     return

@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useLocale } from '@easemob-community/uikit-core'
+import { MESSAGE_TYPE, useLocale, useToast } from '@easemob-community/uikit-core'
 import { filterActiveMentions } from '../../../utils/mention'
 import { EmButton as Button } from '@easemob-community/uikit-core'
 import { EmIcon as Icon } from '@easemob-community/uikit-core'
 import { EmEmojiPicker as EmojiPicker } from '@easemob-community/uikit-core'
 import type { EmojiStickerItem } from '@easemob-community/uikit-core'
 import type { ChatConfig, MentionContact } from '../types'
+import ComposerEmbed from '../message-input/composer-embed.vue'
+import { filesFromDataTransfer, filterComposerFiles, type ComposerSegment } from '../message-input/composer-segment'
+import { useComposerBlocks } from '../message-input/use-composer-blocks'
 
 export interface H5InputProps {
   config?: ChatConfig['input']
@@ -16,6 +19,8 @@ export interface H5InputProps {
   keyboardHeight?: number
   /** @提及选择弹层是否打开（打开时 Enter 优先用于选择联系人，不发送消息） */
   mentionOpen?: boolean
+  /** 编辑文字时禁止插入媒体 */
+  mediaDisabled?: boolean
 }
 
 const props = withDefaults(defineProps<H5InputProps>(), {
@@ -23,8 +28,7 @@ const props = withDefaults(defineProps<H5InputProps>(), {
 })
 
 const emit = defineEmits<{
-  (e: 'send', text: string, mentionList?: MentionContact[]): void
-  (e: 'send-file', type: 'image' | 'file' | 'video', files: FileList): void
+  (e: 'send', text: string, mentionList?: MentionContact[], segments?: ComposerSegment[]): void
   (e: 'voice-start'): void
   (e: 'voice-end', duration: number): void
   (e: 'voice-cancel'): void
@@ -36,9 +40,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useLocale()
-
-/** 输入文本 */
-const text = ref('')
+const { show: showToast } = useToast()
 
 /** 表情包（sticker）配置 */
 const stickerPacks = computed(() => props.config?.stickerPacks ?? [])
@@ -105,8 +107,41 @@ const rootStyle = computed(() => {
   return { paddingBottom: 'var(--uikit-safe-bottom, 0px)' }
 })
 
-/** 输入框引用 */
-const textareaRef = ref<HTMLTextAreaElement>()
+const {
+  blocks,
+  activeTextId,
+  hasMedia,
+  hasContent,
+  activeTextBlock,
+  focusText,
+  insertFiles,
+  removeBlock,
+  resetBlocks,
+  collect,
+  getText: getComposerText,
+  setText: setComposerText,
+} = useComposerBlocks({
+  mediaDisabled: () => !!props.mediaDisabled,
+  features: () => ({
+    image: features.value.image,
+    file: features.value.file,
+    video: features.value.video,
+  }),
+  onOverflow: () => showToast(t('chat.input.multiBodyLimit'), 'error'),
+})
+
+const textareaRefs = new Map<string, HTMLTextAreaElement>()
+
+function setTextareaRef(id: string, el: unknown) {
+  if (el instanceof HTMLTextAreaElement)
+    textareaRefs.set(id, el)
+  else
+    textareaRefs.delete(id)
+}
+
+function getInputEl(): HTMLTextAreaElement | undefined {
+  return textareaRefs.get(activeTextId.value)
+}
 
 /** 切换面板；与键盘互斥：开面板前先 blur textarea */
 function togglePanel(panel: PanelType) {
@@ -114,7 +149,7 @@ function togglePanel(panel: PanelType) {
     activePanel.value = 'none'
     return
   }
-  textareaRef.value?.blur()
+  getInputEl()?.blur()
   activePanel.value = panel
   // 面板展开时也 emit 一次 focus：供上层把消息列表滚动到底部（语义同键盘弹起）
   emit('focus')
@@ -142,13 +177,14 @@ function handleSend() {
   // @提及弹层打开时，Enter 优先交给弹层选择联系人，不发送消息
   if (props.mentionOpen)
     return
-  const trimmed = text.value.trim()
-  if (!trimmed)
+  const segments = collect()
+  if (segments.length === 0)
     return
+  const trimmed = getComposerText().trim()
   // 过滤出实际出现在文本中的 mention（精确匹配，防止删除后残留/前缀误判）
   const activeMentions = filterActiveMentions(trimmed, mentionList.value)
-  emit('send', trimmed, activeMentions.length > 0 ? activeMentions : undefined)
-  text.value = ''
+  emit('send', trimmed, activeMentions.length > 0 ? activeMentions : undefined, segments)
+  resetBlocks()
   mentionList.value = []
 }
 
@@ -185,7 +221,7 @@ function onInput() {
 
 /** 根据内容调整 textarea 高度 */
 function autoGrow() {
-  const el = textareaRef.value
+  const el = getInputEl()
   if (!el)
     return
   el.style.height = 'auto'
@@ -198,9 +234,9 @@ function autoGrow() {
   el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden'
 }
 
-watch(text, () => {
+watch(blocks, () => {
   nextTick(autoGrow)
-})
+}, { deep: true })
 
 // ===== 语音录制（微信式：按住说话，上滑取消）=====
 
@@ -231,7 +267,7 @@ function toggleVoiceMode() {
   isVoiceMode.value = !isVoiceMode.value
   if (isVoiceMode.value) {
     // 进入语音模式：收起面板与键盘
-    textareaRef.value?.blur()
+    getInputEl()?.blur()
     activePanel.value = 'none'
   }
 }
@@ -326,14 +362,46 @@ const moreItems = computed(() => {
   return items
 })
 
-/** 文件选择完成：发送并关闭更多面板 */
-function onFileSelected(type: 'image' | 'file' | 'video', event: Event) {
+function currentCursor(): number {
+  return getInputEl()?.selectionStart ?? activeTextBlock()?.content.length ?? 0
+}
+
+function insertComposerFiles(files: File[]) {
+  insertFiles(files, currentCursor())
+  nextTick(() => getInputEl()?.focus())
+}
+
+/** 文件选择完成：插入到输入顺序中并关闭更多面板 */
+function onFileSelected(_type: 'image' | 'file' | 'video', event: Event) {
   const files = (event.target as HTMLInputElement).files
-  if (files && files.length > 0) {
-    emit('send-file', type, files)
-    ;(event.target as HTMLInputElement).value = ''
-  }
+  if (files && files.length > 0)
+    insertComposerFiles(Array.from(files))
+  ;(event.target as HTMLInputElement).value = ''
   activePanel.value = 'none'
+}
+
+function onPaste(e: ClipboardEvent) {
+  const files = filterComposerFiles(
+    filesFromDataTransfer(e.clipboardData),
+    {
+      image: features.value.image,
+      file: features.value.file,
+      video: features.value.video,
+    },
+    props.config?.pasteImagePreview !== false,
+  )
+  if (files.length === 0)
+    return
+  e.preventDefault()
+  insertComposerFiles(files)
+}
+
+function onDrop(e: DragEvent) {
+  const files = filesFromDataTransfer(e.dataTransfer)
+  if (files.length === 0)
+    return
+  e.preventDefault()
+  insertComposerFiles(files)
 }
 
 // ===== @提及（行为对齐 simple-input.vue）=====
@@ -369,7 +437,7 @@ function getCaretCoordinates(el: HTMLTextAreaElement, position: number) {
 function detectMention() {
   if (!props.enableMention)
     return
-  const el = textareaRef.value
+  const el = getInputEl()
   if (!el)
     return
   const pos = el.selectionStart || 0
@@ -411,7 +479,7 @@ function detectMention() {
 
 /** 在光标位置插入 @提及文本（替换已有的 @keyword） */
 function insertMention(contact: MentionContact) {
-  const el = textareaRef.value
+  const el = getInputEl()
   if (!el)
     return
 
@@ -428,7 +496,9 @@ function insertMention(contact: MentionContact) {
 
   const before = value.substring(0, atPos)
   const after = value.substring(pos)
-  text.value = `${before}@${contact.name} ${after}`
+  const block = activeTextBlock()
+  if (block)
+    block.content = `${before}@${contact.name} ${after}`
 
   // 记录 mention
   if (!mentionList.value.find(m => m.userId === contact.userId))
@@ -444,26 +514,30 @@ function insertMention(contact: MentionContact) {
 
 /** 在末尾追加 @提及 */
 function appendMention(contact: MentionContact) {
-  const el = textareaRef.value
+  const el = getInputEl()
   if (!el)
     return
-  const prefix = text.value.length > 0 && !text.value.endsWith(' ') ? ' ' : ''
-  text.value = `${text.value}${prefix}@${contact.name} `
+  const block = activeTextBlock()
+  if (!block)
+    return
+  const prefix = block.content.length > 0 && !block.content.endsWith(' ') ? ' ' : ''
+  block.content = `${block.content}${prefix}@${contact.name} `
   if (!mentionList.value.find(m => m.userId === contact.userId))
     mentionList.value.push(contact)
   nextTick(() => {
     el.focus()
-    const newPos = text.value.length
+    const newPos = block.content.length
     el.setSelectionRange(newPos, newPos)
   })
 }
 
 /** 在光标位置插入 Emoji */
 function insertEmoji(emoji: string) {
-  const el = textareaRef.value
-  if (!el) {
-    // 语音模式下无 textarea，直接追加到末尾
-    text.value += emoji
+  const el = getInputEl()
+  const block = activeTextBlock()
+  if (!el || !block) {
+    if (block)
+      block.content += emoji
     return
   }
 
@@ -471,7 +545,7 @@ function insertEmoji(emoji: string) {
   const end = el.selectionEnd || 0
   const value = el.value
 
-  text.value = value.substring(0, start) + emoji + value.substring(end)
+  block.content = value.substring(0, start) + emoji + value.substring(end)
 
   nextTick(() => {
     const newPos = start + emoji.length
@@ -487,22 +561,22 @@ function onSelectSticker(sticker: EmojiStickerItem) {
 
 /** 设置输入文本 */
 function setText(value: string) {
-  text.value = value
+  setComposerText(value)
   mentionList.value = []
   nextTick(() => {
-    textareaRef.value?.focus()
+    getInputEl()?.focus()
   })
 }
 
 /** 获取当前输入文本 */
 function getText(): string {
-  return text.value
+  return getComposerText()
 }
 
 /** 自动聚焦 */
 onMounted(() => {
   if (props.config?.autoFocus)
-    textareaRef.value?.focus()
+    getInputEl()?.focus()
 })
 
 /** 组件卸载时清理计时器 */
@@ -524,7 +598,14 @@ defineExpose({
 </script>
 
 <template>
-  <div class="h5-input" :style="rootStyle">
+  <div
+    class="h5-input"
+    :class="{ 'h5-input--has-embed': hasMedia }"
+    :style="rootStyle"
+    @paste="onPaste"
+    @dragover.prevent
+    @drop.prevent="onDrop"
+  >
     <!-- 工具条：[语音切换] [输入区] [表情] [+ / 发送] -->
     <div class="h5-input__toolbar">
       <button
@@ -537,19 +618,27 @@ defineExpose({
         <Icon :name="isVoiceMode ? 'mic' : 'mic'" :size="24" />
       </button>
 
-      <!-- 文本输入：auto-grow textarea -->
-      <textarea
-        v-if="!isVoiceMode"
-        ref="textareaRef"
-        v-model="text"
-        class="h5-input__textarea"
-        :placeholder="t('chat.placeholder')"
-        :maxlength="maxLengthValue"
-        rows="1"
-        @keydown="onKeydown"
-        @input="onInput"
-        @focus="onTextareaFocus"
-      />
+      <div v-if="!isVoiceMode" class="h5-input__composer">
+        <template v-for="block in blocks" :key="block.id">
+          <textarea
+            v-if="block.type === MESSAGE_TYPE.TEXT"
+            :ref="(el) => setTextareaRef(block.id, el)"
+            v-model="block.content"
+            class="h5-input__textarea"
+            :placeholder="!hasMedia && !block.content ? t('chat.placeholder') : ''"
+            :maxlength="maxLengthValue"
+            rows="1"
+            @keydown="onKeydown"
+            @input="onInput"
+            @focus="focusText(block.id); onTextareaFocus()"
+          />
+          <ComposerEmbed
+            v-else
+            :block="block"
+            @remove="removeBlock(block.id)"
+          />
+        </template>
+      </div>
 
       <!-- 语音模式：按住 说话 -->
       <div
@@ -576,9 +665,8 @@ defineExpose({
         <Icon name="circle/face" :size="24" />
       </button>
 
-      <!-- 有文本时「+」替换为发送按钮 -->
       <Button
-        v-if="text.trim()"
+        v-if="hasContent"
         type="primary"
         size="small"
         class="h5-input__send-btn"
@@ -587,7 +675,7 @@ defineExpose({
         {{ t('chat.send') }}
       </Button>
       <button
-        v-else
+        v-if="!mediaDisabled"
         type="button"
         class="h5-input__icon-btn"
         :class="{ 'h5-input__icon-btn--active': activePanel === 'more' }"
@@ -683,12 +771,14 @@ defineExpose({
       ref="videoInputRef"
       type="file"
       accept="video/*"
+      multiple
       style="display: none"
       @change="onFileSelected('video', $event)"
     />
     <input
       ref="fileInputRef"
       type="file"
+      multiple
       style="display: none"
       @change="onFileSelected('file', $event)"
     />
@@ -708,6 +798,16 @@ defineExpose({
   align-items: flex-end;
   gap: var(--uikit-container-gap, 8px);
   padding: var(--uikit-input-padding-y, 8px) var(--uikit-input-padding-x, 12px);
+}
+
+.h5-input__composer {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  max-height: 180px;
+  overflow: auto;
 }
 
 .h5-input__icon-btn {
@@ -731,7 +831,7 @@ defineExpose({
 }
 
 .h5-input__textarea {
-  flex: 1;
+  flex: 1 0 auto;
   min-width: 0;
   padding: var(--uikit-input-padding-y, 8px) var(--uikit-input-padding-x, 12px);
   border: none;

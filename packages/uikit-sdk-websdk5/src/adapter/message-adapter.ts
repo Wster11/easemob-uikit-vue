@@ -5,6 +5,7 @@ import {
   MESSAGE_STATUS,
   MESSAGE_TYPE,
   createLogger,
+  formatMultiBodyPreview,
   isCmdBody as isCmdMessageBody,
   isCombineBody as isCombineMessageBody,
   isCustomBody as isCustomMessageBody,
@@ -113,6 +114,8 @@ export function extractLastMessageText(
     return ''
 
   const l = mergeMessagePreviewLabels({ ...defaultAdapterPreviewLabels, ...labels })
+  if (sdkMsg.type === MESSAGE_TYPE.MULTI_BODY)
+    return formatMultiBodyPreview(sdkMsg.body, l)
   const { body } = sdkMsg
   if (isTextMessageBody(body))
     return body.content || ''
@@ -170,6 +173,8 @@ export function extractSnippetText(
       return '[命令]'
     case MESSAGE_TYPE.COMBINE:
       return (body.summary as string) || l.combine
+    case MESSAGE_TYPE.MULTI_BODY:
+      return formatMultiBodyPreview(body, l)
     default: {
       // SDK 链路异常时 snippet.type 可能落为 'unknown' 等未知值
       // （如 toConversationSummary 从被 stripBodyType 清空的 body.type 读类型）。

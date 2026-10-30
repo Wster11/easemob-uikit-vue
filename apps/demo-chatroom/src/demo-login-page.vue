@@ -23,7 +23,7 @@ const savedConfig = (() => {
   }
 })()
 
-const sdkAppKey = ref(savedConfig?.appKey || 'easemob-demo#support-ngi')
+const sdkAppKey = ref(savedConfig?.appKey || 'easemob-demo#support')
 const sdkApiUrl = ref(savedConfig?.apiUrl || '')
 const loginUser = ref(savedConfig?.user || '')
 const loginPassword = ref(savedConfig?.password || '')
@@ -116,7 +116,7 @@ async function handleLogin() {
       <div class="login-form">
         <div class="login-field">
           <label class="login-label">AppKey</label>
-          <input v-model="sdkAppKey" placeholder="例如: easemob-demo#support-ngi" class="login-input">
+          <input v-model="sdkAppKey" placeholder="例如: easemob-demo#support" class="login-input">
         </div>
 
         <div class="login-field">
